@@ -51,6 +51,17 @@ func translatePersistenceError(err error, notFound, conflict *infraerrors.Applic
 	if err == nil {
 		return nil
 	}
+	var pgErr *pq.Error
+	if errors.As(err, &pgErr) && pgErr.Code == "P0001" {
+		messages := map[string]string{
+			"EGRESS_ENROLLMENT_REQUIRED": "账号已暂停，请先在固定 IPv6 出口页面完成启用与核验，再开放调度",
+			"EGRESS_FIXED_IPV6_REQUIRED": "此账号必须使用固定 IPv6，不能通过修改账号类型、母账号或出口策略绕过",
+			"EGRESS_PARENT_NOT_READY":    "请先为母账号启用固定 IPv6，核验通过后再创建影子账号",
+		}
+		if message, ok := messages[pgErr.Message]; ok {
+			return infraerrors.New(409, pgErr.Message, message).WithCause(err)
+		}
+	}
 
 	// 兼容 Ent ORM 和标准 database/sql 的 NotFound 行为。
 	// Ent 使用自定义的 NotFoundError，而标准库使用 sql.ErrNoRows。

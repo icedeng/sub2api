@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -68,9 +69,10 @@ func (e *openAIWSDialError) Unwrap() error {
 }
 
 type openAIWSAcquireRequest struct {
-	Account *Account
-	WSURL   string
-	Headers http.Header
+	WayviaRoute *wayviaegress.Route
+	Account     *Account
+	WSURL       string
+	Headers     http.Header
 	// HeadersFactory is evaluated inside dialConn. It exists so credentials
 	// whose authorization is per-dial (Agent Identity) are never cached in
 	// lastAcquire or delayed prewarm state.
@@ -1113,6 +1115,13 @@ type openAIWSAcquireQueueWait struct {
 }
 
 func (p *openAIWSConnPool) Acquire(ctx context.Context, req openAIWSAcquireRequest) (*openAIWSConnLease, error) {
+	if req.Account != nil {
+		r, err := wayviaegress.Resolve(req.Account.ID, "business")
+		if err != nil {
+			return nil, err
+		}
+		req.WayviaRoute = &r
+	}
 	if p != nil {
 		p.metrics.acquireTotal.Add(1)
 	}
@@ -1950,6 +1959,20 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 	}()
 
 	for i := 0; i < total; i++ {
+		pool, ok := p.getAccountPool(accountID)
+		if !ok || pool == nil {
+			return
+		}
+		pool.mu.Lock()
+		valid := len(generations) == 0 || pool.generation == generation && pool.lastAcquire != nil && sameOpenAIWSPrewarmTarget(req, *pool.lastAcquire)
+		if !valid {
+			pool.creating = max(0, pool.creating-(total-i))
+			pool.signalChangedLocked()
+		}
+		pool.mu.Unlock()
+		if !valid {
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), p.dialTimeout()+openAIWSConnPrewarmExtraDelay)
 		conn, err := p.dialConn(ctx, req)
 		cancel()
@@ -2123,6 +2146,19 @@ func (p *openAIWSConnPool) UnpinConn(accountID int64, connID string) {
 func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequest) (*openAIWSConn, error) {
 	if p == nil || p.clientDialer == nil {
 		return nil, errors.New("openai ws client dialer is nil")
+	}
+	if req.Account == nil {
+		return nil, errors.New("missing ws account")
+	}
+	ctx = wayviaegress.WithAccount(ctx, req.Account.ID, "business")
+	if req.WayviaRoute != nil {
+		if err := req.WayviaRoute.Check(); err != nil {
+			return nil, err
+		}
+		ctx = wayviaegress.WithResolvedRoute(ctx, *req.WayviaRoute)
+	}
+	if err := wayviaegress.CheckAccount(req.Account.ID); err != nil {
+		return nil, err
 	}
 	headers := cloneHeader(req.Headers)
 	var err error

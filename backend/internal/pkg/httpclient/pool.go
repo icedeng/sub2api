@@ -27,6 +27,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 // Transport 连接池默认配置
@@ -41,6 +42,7 @@ const (
 
 // Options 定义共享 HTTP 客户端的构建参数
 type Options struct {
+	Route                 *wayviaegress.Route
 	ProxyURL              string        // 代理 URL（支持 http/https/socks5/socks5h）
 	Timeout               time.Duration // 请求总超时时间
 	ResponseHeaderTimeout time.Duration // 等待响应头超时时间
@@ -65,6 +67,9 @@ var validateResolvedIP = urlvalidator.ValidateResolvedIP
 // 安全说明：代理配置失败时直接返回错误，不会回退到直连，避免 IP 关联风险
 func GetClient(opts Options) (*http.Client, error) {
 	key := buildClientKey(opts)
+	if opts.Route != nil {
+		key += "|" + opts.Route.Key()
+	}
 	if cached, ok := sharedClients.Load(key); ok {
 		if client, ok := cached.(*http.Client); ok {
 			return client, nil
@@ -76,7 +81,12 @@ func GetClient(opts Options) (*http.Client, error) {
 		return nil, err
 	}
 
-	actual, _ := sharedClients.LoadOrStore(key, client)
+	actual, loaded := sharedClients.LoadOrStore(key, client)
+	if loaded {
+		client.CloseIdleConnections()
+	} else if opts.Route != nil {
+		opts.Route.OnInvalidated(func() { sharedClients.CompareAndDelete(key, client); client.CloseIdleConnections() })
+	}
 	if c, ok := actual.(*http.Client); ok {
 		return c, nil
 	}
@@ -92,6 +102,9 @@ func buildClient(opts Options) (*http.Client, error) {
 	var rt http.RoundTripper = transport
 	if opts.ValidateResolvedIP && !opts.AllowPrivateHosts {
 		rt = newValidatedTransport(transport)
+	}
+	if opts.Route != nil {
+		rt = wayviaegress.WrapTransport(rt, *opts.Route)
 	}
 	rt = servertiming.WrapRoundTripper(rt)
 	return &http.Client{
@@ -112,9 +125,9 @@ func buildTransport(opts Options) (*http.Transport, error) {
 	}
 
 	transport := &http.Transport{
-		DialContext: (&net.Dialer{
+		DialContext: wayviaegress.GuardDial((&net.Dialer{
 			Timeout: defaultDialTimeout,
-		}).DialContext,
+		}).DialContext),
 		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
 		MaxIdleConns:          maxIdleConns,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
@@ -132,11 +145,21 @@ func buildTransport(opts Options) (*http.Transport, error) {
 	if err != nil {
 		return nil, err
 	}
+	if opts.Route != nil {
+		if opts.Route.Strict() && parsed != nil {
+			return nil, wayviaegress.Error("EGRESS_PROXY_CONFLICT", "固定IPv6禁止代理")
+		}
+		transport.DialContext = opts.Route.Dial(transport.DialContext)
+	}
 	if parsed == nil {
 		return transport, nil
 	}
 
-	if err := proxyutil.ConfigureTransportProxy(transport, parsed); err != nil {
+	var routes []wayviaegress.Route
+	if opts.Route != nil {
+		routes = append(routes, *opts.Route)
+	}
+	if err := proxyutil.ConfigureTransportProxy(transport, parsed, routes...); err != nil {
 		return nil, err
 	}
 

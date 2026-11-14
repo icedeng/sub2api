@@ -1,0 +1,70 @@
+# Linux rootful Docker 单活部署；不能叠加官方 bridge compose。
+services:
+  sub2api:
+    image: ${WAYVIA_IMAGE:?set a tested custom image digest}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 240s
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      AUTO_SETUP: "true"
+      SERVER_HOST: "127.0.0.1"
+      SERVER_PORT: "8080"
+      DATABASE_HOST: "127.0.0.1"
+      DATABASE_PORT: "15432"
+      DATABASE_USER: sub2api
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      DATABASE_DBNAME: sub2api
+      DATABASE_SSLMODE: disable
+      REDIS_HOST: "127.0.0.1"
+      REDIS_PORT: "16379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?required}
+      JWT_SECRET: ${JWT_SECRET:?required}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:?required}
+      WAYVIA_EGRESS_CONFIG: /etc/wayvia-egress/config.json
+    volumes:
+      - ./data:/app/data
+      - /etc/wayvia-egress/config.json:/etc/wayvia-egress/config.json:ro
+      - /etc/wayvia-egress/allocation.key:/etc/wayvia-egress/allocation.key:ro
+      - /var/lib/wayvia-egress/app:/var/lib/wayvia-egress/app
+      - /run/wayvia-egress:/run/wayvia-egress:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sub2api
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: sub2api
+    ports: ["127.0.0.1:15432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U sub2api"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?required}
+    ports: ["127.0.0.1:16379:6379"]
+    volumes: ["redis_data:/data"]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+volumes:
+  postgres_data:
+  redis_data:

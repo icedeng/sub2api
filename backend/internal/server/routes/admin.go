@@ -2,10 +2,13 @@
 package routes
 
 import (
+	"strconv"
+
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 
 	"github.com/gin-gonic/gin"
 )
@@ -35,6 +38,8 @@ func RegisterAdminRoutes(
 	{
 		// 部署与运营合规确认
 		registerAdminComplianceRoutes(admin, h)
+
+		registerWayviaEgressRoutes(admin, h)
 
 		// 仪表盘
 		registerDashboardRoutes(admin, h)
@@ -394,7 +399,12 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.GET("/:id/opencode-go-usage", h.Admin.Account.GetOpenCodeGoUsage)
 		accounts.PUT("/:id/opencode-go-usage/auto-refresh", h.Admin.Account.SetOpenCodeGoUsageAutoRefresh)
 		accounts.POST("/:id/opencode-go-usage/refresh", h.Admin.Account.RefreshOpenCodeGoUsage)
-		accounts.DELETE("/:id", h.Admin.Account.Delete)
+		accounts.DELETE("/:id", func(c *gin.Context) {
+			id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+			if err == nil && (wayviaegress.IsStrict(id) || wayviaegress.ControlledRefresh(id)) {
+				h.Admin.Setting.RequireWayviaStepUp(c)
+			}
+		}, h.Admin.Account.Delete)
 		accounts.POST("/:id/test", h.Admin.Account.Test)
 		accounts.POST("/:id/recover-state", h.Admin.Account.RecoverState)
 		accounts.POST("/:id/refresh", h.Admin.Account.Refresh)
@@ -423,7 +433,11 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/batch-update-credentials", h.Admin.Account.BatchUpdateCredentials)
 		accounts.POST("/batch-refresh-tier", h.Admin.Account.BatchRefreshTier)
 		accounts.POST("/bulk-update", h.Admin.Account.BulkUpdate)
-		accounts.POST("/batch-delete", h.Admin.Account.BatchDelete)
+		accounts.POST("/batch-delete", func(c *gin.Context) {
+			if wayviaegress.HasStrict() || wayviaegress.Configured() {
+				h.Admin.Setting.RequireWayviaStepUp(c)
+			}
+		}, h.Admin.Account.BatchDelete)
 		accounts.POST("/batch-clear-error", h.Admin.Account.BatchClearError)
 		accounts.POST("/batch-refresh", h.Admin.Account.BatchRefresh)
 

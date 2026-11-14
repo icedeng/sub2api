@@ -10,6 +10,7 @@ import (
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 // OpenAIOAuthService handles OpenAI OAuth authentication flows
@@ -81,14 +82,32 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 	normalizedPlatform := normalizeOpenAIOAuthPlatform(platform)
 	clientID, _ := openai.OAuthClientConfigByPlatform(normalizedPlatform)
 
+	accountID, _ := wayviaegress.AccountContext(ctx)
+	var policyVersion int64
+	if accountID > 0 {
+		if wayviaegress.AdminActor(ctx) <= 0 || wayviaegress.Default() == nil {
+			return nil, wayviaegress.Conflict("请使用出口管理页关联授权入口")
+		}
+		var err error
+		policyVersion, err = wayviaegress.Default().ReauthVersion(accountID)
+		if err != nil {
+			return nil, err
+		}
+		if proxyID != nil {
+			return nil, wayviaegress.Conflict("固定 IPv6 账号重新授权禁止使用代理")
+		}
+	}
 	// Store session
 	session := &openai.OAuthSession{
-		State:        state,
-		CodeVerifier: codeVerifier,
-		ClientID:     clientID,
-		RedirectURI:  redirectURI,
-		ProxyURL:     proxyURL,
-		CreatedAt:    time.Now(),
+		AccountID:     accountID,
+		ActorID:       wayviaegress.AdminActor(ctx),
+		PolicyVersion: policyVersion,
+		State:         state,
+		CodeVerifier:  codeVerifier,
+		ClientID:      clientID,
+		RedirectURI:   redirectURI,
+		ProxyURL:      proxyURL,
+		CreatedAt:     time.Now(),
 	}
 	s.sessionStore.Set(sessionID, session)
 
@@ -112,6 +131,8 @@ type OpenAIExchangeCodeInput struct {
 
 // OpenAITokenInfo represents the token information for OpenAI
 type OpenAITokenInfo struct {
+	WayviaPersisted       bool `json:"-"`
+	wayviaCredentials     map[string]any
 	AccessToken           string `json:"access_token"`
 	RefreshToken          string `json:"refresh_token"`
 	IDToken               string `json:"id_token,omitempty"`
@@ -142,7 +163,51 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 	if subtle.ConstantTimeCompare([]byte(input.State), []byte(session.State)) != 1 {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_STATE", "invalid oauth state")
 	}
+	if wayviaegress.AdminActor(ctx) > 0 && session.AccountID <= 0 {
+		return nil, wayviaegress.Conflict("专用入口只允许账号关联会话")
+	}
 
+	if session.AccountID > 0 {
+		if session.ActorID <= 0 || session.ActorID != wayviaegress.AdminActor(ctx) {
+			return nil, wayviaegress.Conflict("授权会话须由同一管理员经二次认证兑换")
+		}
+		if input.ProxyID != nil || input.RedirectURI != "" && input.RedirectURI != session.RedirectURI {
+			return nil, wayviaegress.Conflict("关联授权禁止覆盖代理或回调")
+		}
+		claimed, ok := s.sessionStore.Take(input.SessionID)
+		if !ok {
+			return nil, wayviaegress.Conflict("授权会话已使用")
+		}
+		var result *OpenAITokenInfo
+		creds, err := wayviaegress.Default().Reauthorize(ctx, claimed.AccountID, claimed.PolicyVersion, func(callCtx context.Context) (map[string]any, error) {
+			proxyURL := ""
+			if a, ok := wayviaegress.Default().Account(claimed.AccountID); ok && a.ProxyID != 0 {
+				p, err := s.proxyRepo.GetByID(callCtx, a.ProxyID)
+				if err != nil {
+					return nil, err
+				}
+				if p == nil {
+					return nil, wayviaegress.Conflict("代理不存在")
+				}
+				proxyURL = p.URL()
+			}
+			token, err := s.oauthClient.ExchangeCode(callCtx, input.Code, claimed.CodeVerifier, claimed.RedirectURI, proxyURL, claimed.ClientID)
+			if err != nil {
+				return nil, err
+			}
+			result, err = openAITokenInfoFromResponse(token, claimed.ClientID, true)
+			if err != nil {
+				return nil, err
+			}
+			return s.BuildAccountCredentials(result), nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		result.WayviaPersisted = true
+		result.wayviaCredentials = creds
+		return result, nil
+	}
 	// Get proxy URL: prefer input.ProxyID, fallback to session.ProxyURL
 	proxyURL := session.ProxyURL
 	if input.ProxyID != nil {
@@ -171,38 +236,21 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 		return nil, err
 	}
 
-	// Parse ID token to get user info
-	var userInfo *openai.UserInfo
-	if tokenResp.IDToken != "" {
-		claims, parseErr := openai.ParseIDToken(tokenResp.IDToken)
-		if parseErr != nil {
-			slog.Warn("openai_oauth_id_token_parse_failed", "error", parseErr)
-		} else {
-			userInfo = claims.GetUserInfo()
+	tokenInfo, err := openAITokenInfoFromResponse(tokenResp, clientID, wayviaegress.Configured())
+	if err != nil {
+		return nil, err
+	}
+
+	if id, _ := wayviaegress.AccountContext(ctx); !wayviaegress.ControlledRefresh(id) {
+		if err := wayviaegress.RejectDuplicateIdentity(tokenInfo.ChatGPTUserID); err != nil {
+			return nil, err
+		}
+		if !wayviaegress.Configured() {
+			s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
 		}
 	}
-
-	// Delete session after successful exchange
+	// 身份校验及查重成功后消费授权会话。
 	s.sessionStore.Delete(input.SessionID)
-
-	tokenInfo := &OpenAITokenInfo{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		IDToken:      tokenResp.IDToken,
-		ExpiresIn:    int64(tokenResp.ExpiresIn),
-		ExpiresAt:    time.Now().Unix() + int64(tokenResp.ExpiresIn),
-		ClientID:     clientID,
-	}
-
-	if userInfo != nil {
-		tokenInfo.Email = userInfo.Email
-		tokenInfo.ChatGPTAccountID = userInfo.ChatGPTAccountID
-		tokenInfo.ChatGPTUserID = userInfo.ChatGPTUserID
-		tokenInfo.OrganizationID = userInfo.OrganizationID
-		tokenInfo.PlanType = userInfo.PlanType
-	}
-
-	s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
 
 	return tokenInfo, nil
 }
@@ -214,44 +262,54 @@ func (s *OpenAIOAuthService) RefreshToken(ctx context.Context, refreshToken stri
 
 // RefreshTokenWithClientID refreshes an OpenAI OAuth token with optional client_id.
 func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refreshToken string, proxyURL string, clientID string) (*OpenAITokenInfo, error) {
+	id, _ := wayviaegress.AccountContext(ctx)
+	if id == 0 && (wayviaegress.HasStrict() || wayviaegress.Configured()) {
+		return nil, wayviaegress.Error("EGRESS_ACCOUNT_CONTEXT_REQUIRED", "存在固定 IPv6 账号，请使用账号关联刷新入口")
+	}
 	tokenResp, err := s.oauthClient.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse ID token to get user info
-	var userInfo *openai.UserInfo
-	if tokenResp.IDToken != "" {
-		claims, parseErr := openai.ParseIDToken(tokenResp.IDToken)
-		if parseErr != nil {
-			slog.Warn("openai_oauth_id_token_parse_failed", "error", parseErr)
-		} else {
-			userInfo = claims.GetUserInfo()
+	tokenInfo, err := openAITokenInfoFromResponse(tokenResp, strings.TrimSpace(clientID), wayviaegress.Configured())
+	if err != nil {
+		return nil, err
+	}
+
+	if id, _ := wayviaegress.AccountContext(ctx); !wayviaegress.ControlledRefresh(id) {
+		if err := wayviaegress.RejectDuplicateIdentity(tokenInfo.ChatGPTUserID); err != nil {
+			return nil, err
 		}
+		s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
 	}
-
-	tokenInfo := &OpenAITokenInfo{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		IDToken:      tokenResp.IDToken,
-		ExpiresIn:    int64(tokenResp.ExpiresIn),
-		ExpiresAt:    time.Now().Unix() + int64(tokenResp.ExpiresIn),
-	}
-	if trimmed := strings.TrimSpace(clientID); trimmed != "" {
-		tokenInfo.ClientID = trimmed
-	}
-
-	if userInfo != nil {
-		tokenInfo.Email = userInfo.Email
-		tokenInfo.ChatGPTAccountID = userInfo.ChatGPTAccountID
-		tokenInfo.ChatGPTUserID = userInfo.ChatGPTUserID
-		tokenInfo.OrganizationID = userInfo.OrganizationID
-		tokenInfo.PlanType = userInfo.PlanType
-	}
-
-	s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
 
 	return tokenInfo, nil
+}
+
+// 固定出口的身份和到期时间均从 AT 读取；ID Token 仅原样兼容保存，不参与判断。
+// 未配置扩展时保留原项目的信息解析行为。
+func openAITokenInfoFromResponse(token *openai.TokenResponse, clientID string, useAccessToken bool) (*OpenAITokenInfo, error) {
+	info := &OpenAITokenInfo{AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, IDToken: token.IDToken, ExpiresIn: int64(token.ExpiresIn), ExpiresAt: time.Now().Unix() + int64(token.ExpiresIn), ClientID: clientID}
+	var user *openai.UserInfo
+	if useAccessToken {
+		verified, err := wayviaegress.AccessTokenFromResponse(token.AccessToken)
+		if err != nil {
+			return nil, err
+		}
+		user, info.ExpiresAt = verified.UserInfo, verified.ExpiresAt.Unix()
+	} else if token.IDToken != "" {
+		claims, err := openai.ParseIDToken(token.IDToken)
+		if err != nil {
+			slog.Warn("openai_oauth_id_token_parse_failed", "error", err)
+		} else {
+			user = claims.GetUserInfo()
+		}
+	}
+	if user != nil {
+		info.Email, info.ChatGPTAccountID, info.ChatGPTUserID = user.Email, user.ChatGPTAccountID, user.ChatGPTUserID
+		info.OrganizationID, info.PlanType = user.OrganizationID, user.PlanType
+	}
+	return info, nil
 }
 
 // enrichTokenInfo 通过 ChatGPT backend-api 补全 tokenInfo 并设置隐私（best-effort）。
@@ -337,6 +395,15 @@ func resolveChatGPTSubscriptionAccountID(tokenInfo *OpenAITokenInfo, orgID strin
 
 // RefreshAccountToken refreshes token for an OpenAI OAuth account
 func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *Account) (*OpenAITokenInfo, error) {
+	if account != nil {
+		ctx = wayviaegress.WithAccount(ctx, account.ID, "refresh")
+		if err := wayviaegress.CheckAccount(account.ID); err != nil {
+			return nil, err
+		}
+		if wayviaegress.ControlledRefresh(account.ID) && !account.IsOpenAIPersonalAccessToken() && !account.IsOpenAIAgentIdentity() {
+			return s.refreshWayviaAccount(ctx, account)
+		}
+	}
 	if account.Platform != PlatformOpenAI {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_ACCOUNT", "account is not an OpenAI account")
 	}
@@ -379,7 +446,12 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 				tokenInfo.ExpiresAt = expiresAt.Unix()
 				tokenInfo.ExpiresIn = int64(time.Until(*expiresAt).Seconds())
 			}
-			s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
+			if id, _ := wayviaegress.AccountContext(ctx); !wayviaegress.ControlledRefresh(id) {
+				if err := wayviaegress.RejectDuplicateIdentity(tokenInfo.ChatGPTUserID); err != nil {
+					return nil, err
+				}
+				s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
+			}
 			return tokenInfo, nil
 		}
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_NO_REFRESH_TOKEN", "no refresh token available")
@@ -391,6 +463,9 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 
 // BuildAccountCredentials builds credentials map from token info
 func (s *OpenAIOAuthService) BuildAccountCredentials(tokenInfo *OpenAITokenInfo) map[string]any {
+	if tokenInfo.WayviaPersisted {
+		return shallowCopyMap(tokenInfo.wayviaCredentials)
+	}
 	creds := map[string]any{
 		"access_token": tokenInfo.AccessToken,
 	}
@@ -445,4 +520,56 @@ func (s *OpenAIOAuthService) Stop() {
 
 func normalizeOpenAIOAuthPlatform(platform string) string {
 	return openai.OAuthPlatformOpenAI
+}
+
+// 所有严格账号刷新入口在服务层收敛，成功返回前凭据已经CAS持久化。
+func (s *OpenAIOAuthService) refreshWayviaAccount(ctx context.Context, account *Account) (*OpenAITokenInfo, error) {
+	var result *OpenAITokenInfo
+	var proxyURL string
+	credentials, err := wayviaegress.Default().Refresh(ctx, account.ID, func(callCtx context.Context, a wayviaegress.Account) (map[string]any, error) {
+		var err error
+		result, proxyURL, err = s.exchangeWayviaRefresh(callCtx, a)
+		if err != nil {
+			return nil, err
+		}
+		return s.BuildAccountCredentials(result), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	result.WayviaPersisted = true
+	result.wayviaCredentials = credentials
+	// query租约重新检查；暂停期间不再补全联网。
+	if _, err := wayviaegress.Resolve(account.ID, "query"); err == nil {
+		queryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		s.enrichTokenInfo(wayviaegress.WithAccount(queryCtx, account.ID, "query"), result, proxyURL)
+		cancel()
+		fields := map[string]any{"email": result.Email, "plan_type": result.PlanType, "subscription_expires_at": result.SubscriptionExpiresAt, "privacy_mode": result.PrivacyMode}
+		if enriched, err := wayviaegress.Default().SaveMetadata(account.ID, credentials, fields); err == nil {
+			result.wayviaCredentials = enriched
+		}
+	}
+	return result, nil
+}
+
+// 启用前刷新与正常刷新共用同一个 Token 客户端；凭据始终由出口模块重新读取并 CAS 保存。
+func (s *OpenAIOAuthService) exchangeWayviaRefresh(ctx context.Context, a wayviaegress.Account) (*OpenAITokenInfo, string, error) {
+	refresh, _ := a.Credentials["refresh_token"].(string)
+	client, _ := a.Credentials["client_id"].(string)
+	proxyURL := ""
+	if a.ProxyID != 0 {
+		if s.proxyRepo == nil {
+			return nil, "", wayviaegress.Conflict("代理仓储不可用")
+		}
+		p, err := s.proxyRepo.GetByID(ctx, a.ProxyID)
+		if err != nil {
+			return nil, "", err
+		}
+		if p == nil {
+			return nil, "", wayviaegress.Conflict("代理不存在")
+		}
+		proxyURL = p.URL()
+	}
+	info, err := s.RefreshTokenWithClientID(ctx, refresh, proxyURL, client)
+	return info, proxyURL, err
 }

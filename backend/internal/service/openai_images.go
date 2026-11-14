@@ -22,6 +22,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"github.com/gin-gonic/gin"
 	"github.com/imroc/req/v3"
 	"github.com/tidwall/gjson"
@@ -687,6 +688,9 @@ func (s *OpenAIGatewayService) ForwardImages(
 	parsed *OpenAIImagesRequest,
 	channelMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	if account != nil && wayviaegress.IsStrict(account.ID) {
+		return nil, wayviaegress.Error("EGRESS_PATH_UNSUPPORTED", "该可选能力尚未完成固定IPv6链路适配")
+	}
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
 	}

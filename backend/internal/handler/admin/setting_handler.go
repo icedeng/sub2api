@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -538,4 +539,25 @@ func systemSettingsResponseData(settings dto.SystemSettings, authSourceDefaults 
 	data["force_email_on_third_party_signup"] = authSourceDefaults.ForceEmailOnThirdPartySignup
 
 	return data
+}
+
+// RequireWayviaStepUp 保留浏览器身份限制，按系统开关校验出口操作的二次认证。
+func (h *SettingHandler) RequireWayviaStepUp(c *gin.Context) {
+	// 关闭二次验证只跳过 TOTP，不扩大机器凭据的出口写权限。
+	if reason, machine := middleware.MachineCredentialReason(c); machine {
+		middleware.AbortWithError(c, 403, reason, "IPv6出口操作仅支持管理员浏览器会话")
+		return
+	}
+	if subject, ok := middleware.GetAuthSubjectFromContext(c); !ok || subject.UserID <= 0 {
+		middleware.AbortWithError(c, 401, "UNAUTHORIZED", "缺少管理员身份")
+		return
+	}
+	if h.settingService == nil || h.totpService == nil || h.userService == nil {
+		response.Error(c, 503, "二次认证服务不可用")
+		c.Abort()
+		return
+	}
+	if middleware.EnforceStepUp(c, h.totpService, h.userService, h.settingService) {
+		c.Next()
+	}
 }

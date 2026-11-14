@@ -11,6 +11,7 @@ import (
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"github.com/imroc/req/v3"
 )
 
@@ -23,8 +24,15 @@ type openaiOAuthService struct {
 	tokenURL string
 }
 
+func (s *openaiOAuthService) endpoint() string {
+	if wayviaegress.Configured() && s.tokenURL == openai.TokenURL {
+		return wayviaegress.TokenEndpoint
+	}
+	return s.tokenURL
+}
+
 func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string) (*openai.TokenResponse, error) {
-	client, err := createOpenAIReqClient(proxyURL)
+	client, err := createOpenAIReqClientForContext(ctx, proxyURL)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_CLIENT_INIT_FAILED", "create HTTP client: %v", err)
 	}
@@ -53,7 +61,7 @@ func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifie
 		SetHeader("originator", authOriginator).
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
-		Post(s.tokenURL)
+		Post(s.endpoint())
 
 	if err != nil {
 		if shouldReturnOpenAINoProxyHint(ctx, proxyURL, err) {
@@ -83,7 +91,7 @@ func (s *openaiOAuthService) RefreshTokenWithClientID(ctx context.Context, refre
 }
 
 func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL, clientID string) (*openai.TokenResponse, error) {
-	client, err := createOpenAIReqClient(proxyURL)
+	client, err := createOpenAIReqClientForContext(ctx, proxyURL)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_CLIENT_INIT_FAILED", "create HTTP client: %v", err)
 	}
@@ -103,7 +111,7 @@ func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refre
 		SetHeader("originator", authOriginator).
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
-		Post(s.tokenURL)
+		Post(s.endpoint())
 
 	if err != nil {
 		if shouldReturnOpenAINoProxyHint(ctx, proxyURL, err) {
@@ -142,4 +150,16 @@ func newOpenAINoProxyHintError(cause error) error {
 		"OPENAI_OAUTH_PROXY_REQUIRED",
 		"OpenAI OAuth request failed: no proxy is configured and this server could not reach OpenAI directly. Select a proxy that can access OpenAI, then retry; if the authorization code has expired, regenerate the authorization URL.",
 	).WithCause(cause)
+}
+
+func createOpenAIReqClientForContext(ctx context.Context, proxyURL string) (*req.Client, error) {
+	id, _ := wayviaegress.AccountContext(ctx)
+	if id == 0 {
+		return getSharedReqClient(reqClientOptions{ProxyURL: proxyURL, Timeout: 120 * time.Second, TokenExchange: true})
+	}
+	route, err := wayviaegress.RouteForContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return getSharedReqClient(reqClientOptions{ProxyURL: proxyURL, Timeout: 120 * time.Second, Route: &route, TokenExchange: true})
 }

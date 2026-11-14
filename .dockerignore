@@ -72,6 +72,8 @@ deploy/sub2api-sudoers
 deploy/data/
 deploy/postgres_data/
 deploy/redis_data/
+deploy/wayvia/.env
+deploy/wayvia/data/
 
 # GoReleaser
 .goreleaser.yaml

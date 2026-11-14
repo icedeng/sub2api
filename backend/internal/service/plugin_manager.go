@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	pluginv1 "github.com/Wei-Shaw/sub2api/pkg/pluginapi/v1"
 )
 
@@ -555,6 +556,11 @@ func verifyLocalPluginBinary(installation *PluginInstallation, root string) erro
 }
 
 func (m *PluginManager) Enable(ctx context.Context, id int64, acceptUntested bool, rolloutPercent int) (*PluginInstallation, error) {
+	wayviaegress.Control.Lock()
+	defer wayviaegress.Control.Unlock()
+	if wayviaegress.HasStrict() {
+		return nil, wayviaegress.Error("EGRESS_PLUGIN_CONFLICT", "存在固定 IPv6 OAuth 账号，禁止启用 OpenAI 传输插件")
+	}
 	m.operationMu.Lock()
 	defer m.operationMu.Unlock()
 	if rolloutPercent < 1 || rolloutPercent > 100 {
@@ -945,6 +951,14 @@ func (m *PluginManager) ReadUIAsset(ctx context.Context, id int64, relative stri
 }
 
 func (m *PluginManager) RoundTripOpenAIOAuth(ctx context.Context, request *http.Request, proxyURL string, account *Account) (*http.Response, bool, error) {
+	if account != nil && account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth {
+		if err := wayviaegress.CheckAccount(account.ID); err != nil {
+			return nil, true, err
+		}
+		if wayviaegress.HasStrict() && m.route.Load() != nil {
+			return nil, true, wayviaegress.Error("EGRESS_PLUGIN_CONFLICT", "固定IPv6与OAuth传输插件冲突")
+		}
+	}
 	if !m.ShouldRouteOpenAIOAuth(account) {
 		return nil, false, nil
 	}

@@ -38,6 +38,10 @@
       </div>
     </div>
 
+    <p v-if="form.platform === 'openai' && form.type === 'oauth'" class="mb-4 rounded-lg bg-primary-50 p-3 text-sm text-primary-800 dark:bg-primary-900/20 dark:text-primary-200">
+      创建后先暂停调度，系统自动配置固定 IPv6；核验成功后自动开放调度，无需手动启用。
+    </p>
+
     <!-- Step 1: Basic Info -->
     <form
       v-if="step === 1"

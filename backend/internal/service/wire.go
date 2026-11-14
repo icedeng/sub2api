@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -119,6 +120,15 @@ func ProvideOpenAIOAuthService(
 ) *OpenAIOAuthService {
 	svc := NewOpenAIOAuthService(proxyRepo, oauthClient)
 	svc.SetPrivacyClientFactory(privacyClientFactory)
+	if m := wayviaegress.Default(); m != nil {
+		m.SetAccessTokenRefresh(func(ctx context.Context, a wayviaegress.Account) (map[string]any, error) {
+			info, _, err := svc.exchangeWayviaRefresh(ctx, a)
+			if err != nil {
+				return nil, err
+			}
+			return svc.BuildAccountCredentials(info), nil
+		}, openAITokenRefreshSkew)
+	}
 	return svc
 }
 
@@ -183,6 +193,13 @@ func ProvideOpenAITokenProvider(
 func ProvidePluginManager(repo PluginRepository, encryptor SecretEncryptor, cfg *config.Config, hostInfo PluginHostInfo, kvStore PluginKVStore, gateway *OpenAIGatewayService) *PluginManager {
 	manager := NewPluginManager(repo, encryptor, cfg, hostInfo, kvStore)
 	manager.SetAccountDirectory(gateway)
+	if e := wayviaegress.Default(); e != nil {
+		e.SetHooks(func() bool { return manager.route.Load() != nil }, func(ids []int64) {
+			for _, id := range ids {
+				gateway.InvalidateAgentIdentityWSConnections(id)
+			}
+		})
+	}
 	return manager
 }
 

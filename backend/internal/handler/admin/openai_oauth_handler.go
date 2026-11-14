@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 
 	"github.com/gin-gonic/gin"
 )
@@ -106,6 +107,7 @@ func NewOpenAIOAuthHandler(
 
 // OpenAIGenerateAuthURLRequest represents the request for generating OpenAI auth URL
 type OpenAIGenerateAuthURLRequest struct {
+	AccountID   int64  `json:"account_id"`
 	ProxyID     *int64 `json:"proxy_id"`
 	RedirectURI string `json:"redirect_uri"`
 }
@@ -119,8 +121,16 @@ func (h *OpenAIOAuthHandler) GenerateAuthURL(c *gin.Context) {
 		req = OpenAIGenerateAuthURLRequest{}
 	}
 
+	ctx := c.Request.Context()
+	if wayviaegress.AdminActor(ctx) > 0 && req.AccountID <= 0 {
+		response.BadRequest(c, "关联授权必须指定母账号ID")
+		return
+	}
+	if req.AccountID > 0 {
+		ctx = wayviaegress.WithAccount(ctx, req.AccountID, "reauth")
+	}
 	result, err := h.openaiOAuthService.GenerateAuthURL(
-		c.Request.Context(),
+		ctx,
 		req.ProxyID,
 		req.RedirectURI,
 		oauthPlatformFromPath(c),
@@ -163,6 +173,10 @@ func (h *OpenAIOAuthHandler) ExchangeCode(c *gin.Context) {
 		return
 	}
 
+	if tokenInfo.WayviaPersisted {
+		response.Success(c, gin.H{"persisted": true, "message": "凭据已保存，请恢复核验出口"})
+		return
+	}
 	response.Success(c, tokenInfo)
 }
 
@@ -288,6 +302,15 @@ func (h *OpenAIOAuthHandler) RefreshAccountToken(c *gin.Context) {
 		return
 	}
 
+	if tokenInfo.WayviaPersisted {
+		updated, err := h.adminService.GetAccount(c.Request.Context(), accountID)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		response.Success(c, dto.AccountFromService(updated))
+		return
+	}
 	// Build new credentials from token info
 	newCredentials := h.openaiOAuthService.BuildAccountCredentials(tokenInfo)
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"github.com/imroc/req/v3"
 )
 
@@ -170,7 +171,8 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 		return nil, err
 	}
 
-	client, err := s.privacyClientFactory(proxyURL)
+	ctx = wayviaegress.WithAccount(ctx, accountID, "query")
+	client, err := accountPrivacyClient(ctx, s.privacyClientFactory, proxyURL)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_CLIENT_ERROR", "failed to build upstream client: %v", err)
 	}
@@ -395,7 +397,8 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, c
 		return nil, err
 	}
 
-	client, err := s.privacyClientFactory(proxyURL)
+	ctx = wayviaegress.WithAccount(ctx, accountID, "query")
+	client, err := accountPrivacyClient(ctx, s.privacyClientFactory, proxyURL)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_CLIENT_ERROR", "failed to build upstream client: %v", err)
 	}

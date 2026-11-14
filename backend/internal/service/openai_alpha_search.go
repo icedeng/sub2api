@@ -13,6 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 const (
@@ -27,6 +29,9 @@ const (
 // *OpenAIForwardResult（WebSearchCalls=1，供按次计费）；上游错误被原样透传
 // 给客户端时返回 (nil, nil)，不产生计费。
 func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+	if account != nil && wayviaegress.IsStrict(account.ID) {
+		return nil, wayviaegress.Error("EGRESS_PATH_UNSUPPORTED", "该可选能力尚未完成固定IPv6链路适配")
+	}
 	if s == nil || c == nil || account == nil {
 		return nil, fmt.Errorf("service, context, and account are required")
 	}

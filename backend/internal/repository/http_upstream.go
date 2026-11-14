@@ -35,6 +35,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 // 默认配置常量
@@ -566,6 +567,13 @@ func (s *httpUpstreamService) acquireClientWithTLS(proxyURL string, accountID in
 // getClientEntryWithTLS 获取或创建带 TLS 指纹的客户端条目
 // TLS 指纹客户端使用独立的缓存键，与普通客户端隔离
 func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
+	route, routeErr := wayviaegress.Resolve(accountID, "business")
+	if routeErr != nil {
+		return nil, routeErr
+	}
+	if route.Strict() && strings.TrimSpace(proxyURL) != "" {
+		return nil, wayviaegress.Error("EGRESS_PROXY_CONFLICT", "固定IPv6禁止代理")
+	}
 	isolation := s.getIsolationMode()
 	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
 	if err != nil {
@@ -574,7 +582,7 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	settings := s.resolvePoolSettings(isolation, accountConcurrency)
 	settings = s.applyProfilePoolSettings(settings, upstreamProfile)
 	// TLS 指纹客户端使用独立的缓存键，加 "tls:" 前缀
-	cacheKey := "tls:" + buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault)
+	cacheKey := "tls:" + buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault) + ":" + route.Key() + fmt.Sprintf(":%#v", profile)
 	poolKey := buildPoolKey(settings, upstreamProtocolModeDefault) + ":tls"
 
 	now := time.Now()
@@ -626,13 +634,13 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 
 	// 创建带 TLS 指纹的 Transport
 	slog.Debug("tls_fingerprint_creating_new_client", "account_id", accountID, "cache_key", cacheKey, "proxy", proxyKey)
-	transport, err := buildUpstreamTransportWithTLSFingerprint(settings, parsedProxy, profile)
+	transport, err := buildUpstreamTransportWithTLSFingerprint(settings, parsedProxy, profile, route)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("build TLS fingerprint transport: %w", err)
 	}
 
-	client := &http.Client{Transport: transport}
+	client := &http.Client{Transport: wayviaegress.WrapTransport(transport, route)}
 	if s.shouldValidateResolvedIP() {
 		client.CheckRedirect = s.redirectChecker
 	}
@@ -647,6 +655,13 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 		atomic.StoreInt64(&entry.inFlight, 1)
 	}
 	s.clients[cacheKey] = entry
+	route.OnInvalidated(func() {
+		s.mu.Lock()
+		if s.clients[cacheKey] == entry {
+			s.removeClientLocked(cacheKey, entry)
+		}
+		s.mu.Unlock()
+	})
 
 	s.evictIdleLocked(now)
 	s.evictOverLimitLocked()
@@ -726,6 +741,13 @@ func (s *httpUpstreamService) getOrCreateClient(proxyURL string, accountID int64
 // enforceLimit=true 时会限制客户端数量，超限且无法淘汰时返回错误
 func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, accountConcurrency int, profile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
 	// 获取隔离模式
+	route, routeErr := wayviaegress.Resolve(accountID, "business")
+	if routeErr != nil {
+		return nil, routeErr
+	}
+	if route.Strict() && strings.TrimSpace(proxyURL) != "" {
+		return nil, wayviaegress.Error("EGRESS_PROXY_CONFLICT", "固定IPv6禁止代理")
+	}
 	isolation := s.getIsolationMode()
 	// 标准化代理 URL 并解析
 	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
@@ -737,7 +759,7 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	settings := s.resolvePoolSettings(isolation, accountConcurrency)
 	settings = s.applyProfilePoolSettings(settings, profile)
 	// 构建缓存键（根据隔离策略不同）
-	cacheKey := buildCacheKey(isolation, proxyKey, accountID, protocolMode)
+	cacheKey := buildCacheKey(isolation, proxyKey, accountID, protocolMode) + ":" + route.Key()
 	// 构建连接池配置键（用于检测配置变更）
 	poolKey := buildPoolKey(settings, protocolMode)
 
@@ -782,12 +804,13 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	}
 
 	// 缓存未命中或需要重建，创建新客户端
-	transport, err := buildUpstreamTransport(settings, parsedProxy, protocolMode)
+	transport, err := buildUpstreamTransport(settings, parsedProxy, protocolMode, route)
+
 	if err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("build transport: %w", err)
 	}
-	client := &http.Client{Transport: transport}
+	client := &http.Client{Transport: wayviaegress.WrapTransport(transport, route)}
 	if s.shouldValidateResolvedIP() {
 		client.CheckRedirect = s.redirectChecker
 	}
@@ -802,6 +825,13 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 		atomic.StoreInt64(&entry.inFlight, 1)
 	}
 	s.clients[cacheKey] = entry
+	route.OnInvalidated(func() {
+		s.mu.Lock()
+		if s.clients[cacheKey] == entry {
+			s.removeClientLocked(cacheKey, entry)
+		}
+		s.mu.Unlock()
+	})
 
 	// 执行淘汰策略：先淘汰空闲超时的，再淘汰超出数量限制的
 	s.evictIdleLocked(now)
@@ -1389,9 +1419,9 @@ func newUpstreamDialer() *net.Dialer {
 //   - MaxConnsPerHost: 每主机最大连接数（达到后新请求等待）
 //   - IdleConnTimeout: 空闲连接超时（超时后关闭）
 //   - ResponseHeaderTimeout: 等待响应头超时（不影响流式传输）
-func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMode string) (*http.Transport, error) {
+func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMode string, routes ...wayviaegress.Route) (*http.Transport, error) {
 	transport := &http.Transport{
-		DialContext:           newUpstreamDialer().DialContext,
+		DialContext:           wayviaegress.GuardDial(newUpstreamDialer().DialContext),
 		TLSHandshakeTimeout:   defaultUpstreamTLSHandshakeTimeout,
 		MaxIdleConns:          settings.maxIdleConns,
 		MaxIdleConnsPerHost:   settings.maxIdleConnsPerHost,
@@ -1415,7 +1445,10 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 		transport.ForceAttemptHTTP2 = false
 		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	}
-	if err := proxyutil.ConfigureTransportProxy(transport, proxyURL); err != nil {
+	if len(routes) > 0 {
+		transport.DialContext = routes[0].Dial(transport.DialContext)
+	}
+	if err := proxyutil.ConfigureTransportProxy(transport, proxyURL, routes...); err != nil {
 		return nil, err
 	}
 	return transport, nil
@@ -1457,7 +1490,7 @@ func enableHTTP2KeepAlive(transport *http.Transport, protocolMode string) (*http
 //   - nil/空: 直连，使用 TLSFingerprintDialer
 //   - http/https: HTTP 代理，使用 HTTPProxyDialer（CONNECT 隧道 + utls 握手）
 //   - socks5: SOCKS5 代理，使用 SOCKS5ProxyDialer（SOCKS5 隧道 + utls 握手）
-func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *url.URL, profile *tlsfingerprint.Profile) (*http.Transport, error) {
+func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *url.URL, profile *tlsfingerprint.Profile, routes ...wayviaegress.Route) (*http.Transport, error) {
 	transport := &http.Transport{
 		MaxIdleConns:          settings.maxIdleConns,
 		MaxIdleConnsPerHost:   settings.maxIdleConnsPerHost,
@@ -1472,7 +1505,11 @@ func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *u
 	if proxyURL == nil {
 		// 直连：使用 TLSFingerprintDialer
 		slog.Debug("tls_fingerprint_transport_direct")
-		dialer := tlsfingerprint.NewDialer(profile, nil)
+		base := wayviaegress.GuardDial(newUpstreamDialer().DialContext)
+		if len(routes) > 0 {
+			base = routes[0].Dial(base)
+		}
+		dialer := tlsfingerprint.NewDialer(profile, base)
 		transport.DialTLSContext = dialer.DialTLSContext
 	} else {
 		scheme := strings.ToLower(proxyURL.Scheme)
@@ -1480,16 +1517,16 @@ func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *u
 		case "socks5", "socks5h":
 			// SOCKS5 代理：使用 SOCKS5ProxyDialer
 			slog.Debug("tls_fingerprint_transport_socks5", "proxy", proxyURL.Host)
-			socks5Dialer := tlsfingerprint.NewSOCKS5ProxyDialer(profile, proxyURL)
+			socks5Dialer := tlsfingerprint.NewSOCKS5ProxyDialer(profile, proxyURL, routes...)
 			transport.DialTLSContext = socks5Dialer.DialTLSContext
 		case "https":
 			// The fingerprint dialer emits a plaintext CONNECT preface and cannot
 			// establish TLS to an HTTPS proxy. Keep proxy routing via net/http.
-			return buildUpstreamTransport(settings, proxyURL, upstreamProtocolModeDefault)
+			return buildUpstreamTransport(settings, proxyURL, upstreamProtocolModeDefault, routes...)
 		case "http":
 			// HTTP/HTTPS 代理：使用 HTTPProxyDialer（CONNECT 隧道）
 			slog.Debug("tls_fingerprint_transport_http_connect", "proxy", proxyURL.Host)
-			httpDialer := tlsfingerprint.NewHTTPProxyDialer(profile, proxyURL)
+			httpDialer := tlsfingerprint.NewHTTPProxyDialer(profile, proxyURL, routes...)
 			transport.DialTLSContext = httpDialer.DialTLSContext
 		default:
 			// 未知代理类型，回退到普通代理配置（无 TLS 指纹）

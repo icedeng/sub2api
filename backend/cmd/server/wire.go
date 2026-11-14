@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/server"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
@@ -64,6 +65,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 }
 
 func providePrivacyClientFactory() service.PrivacyClientFactory {
+	service.SetAccountPrivacyClientFactory(repository.CreateAccountPrivacyReqClient)
 	return repository.CreatePrivacyReqClient
 }
 
@@ -458,6 +460,9 @@ func provideCleanup(
 			}
 		}
 
+		if m := wayviaegress.Default(); m != nil {
+			m.Close()
+		}
 		runParallel(parallelSteps)
 		runSequential(infraSteps)
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	openaiwsv2 "github.com/Wei-Shaw/sub2api/internal/service/openai_ws_v2"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	coderws "github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 )
@@ -123,7 +125,14 @@ func (d *coderOpenAIWSClientDialer) Dial(
 		return nil, 0, nil, errors.New("ws url is empty")
 	}
 
-	wrapped := &coderOpenAIWSClientConn{}
+	route, routeErr := wayviaegress.RouteForContext(ctx)
+	if routeErr != nil {
+		return nil, 0, nil, routeErr
+	}
+	if route.Strict() && strings.TrimSpace(proxyURL) != "" {
+		return nil, 0, nil, wayviaegress.Error("EGRESS_PROXY_CONFLICT", "固定IPv6禁止代理")
+	}
+	wrapped := &coderOpenAIWSClientConn{wayviaRoute: route}
 	opts := &coderws.DialOptions{
 		HTTPHeader:      cloneHeader(headers),
 		CompressionMode: coderws.CompressionContextTakeover,
@@ -140,6 +149,26 @@ func (d *coderOpenAIWSClientDialer) Dial(
 		opts.HTTPClient = proxyClient
 	}
 
+	if opts.HTTPClient == nil || route.Owner != "" {
+		base := http.DefaultTransport.(*http.Transport).Clone()
+		if opts.HTTPClient != nil {
+			if existing, ok := opts.HTTPClient.Transport.(*http.Transport); ok {
+				base = existing.Clone()
+			}
+		}
+		dial := base.DialContext
+		if dial == nil {
+			dial = (&net.Dialer{}).DialContext
+		}
+		base.DialContext = route.Dial(dial)
+		if route.Strict() {
+			base.Proxy = nil
+		}
+		opts.HTTPClient = &http.Client{Transport: wayviaegress.WrapTransport(base, route), CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("websocket redirect denied") }}
+	}
+	if route.Strict() {
+		ctx, wrapped.wayviaEvidence = wayviaegress.WithSocketCapture(ctx)
+	}
 	conn, resp, err := coderws.Dial(ctx, targetURL, opts)
 	if err != nil {
 		status := 0
@@ -189,6 +218,7 @@ func (d *coderOpenAIWSClientDialer) proxyHTTPClient(proxy string) (*http.Client,
 	}
 	d.cleanupProxyClientsLocked(now)
 	transport := &http.Transport{
+		DialContext:         wayviaegress.GuardDial((&net.Dialer{}).DialContext),
 		Proxy:               http.ProxyURL(parsedProxyURL),
 		MaxIdleConns:        openAIWSProxyTransportMaxIdleConns,
 		MaxIdleConnsPerHost: openAIWSProxyTransportMaxIdleConnsPerHost,
@@ -289,8 +319,10 @@ func (d *coderOpenAIWSClientDialer) SnapshotTransportMetrics() OpenAIWSTransport
 }
 
 type coderOpenAIWSClientConn struct {
-	conn          *coderws.Conn
-	upstreamPings atomic.Int64
+	wayviaRoute    wayviaegress.Route
+	wayviaEvidence *wayviaegress.SocketCapture
+	conn           *coderws.Conn
+	upstreamPings  atomic.Int64
 }
 
 func (c *coderOpenAIWSClientConn) UpstreamPingCount() int64 {
@@ -306,10 +338,15 @@ func (c *coderOpenAIWSClientConn) WriteJSON(ctx context.Context, value any) erro
 	if c == nil || c.conn == nil {
 		return errOpenAIWSConnClosed
 	}
+	if err := c.wayviaRoute.Check(); err != nil {
+		return err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return wsjson.Write(ctx, c.conn, value)
+	err := wsjson.Write(ctx, c.conn, value)
+	c.wayviaEvidence.Sent(c.wayviaRoute, ctx, err)
+	return err
 }
 
 func (c *coderOpenAIWSClientConn) ReadMessage(ctx context.Context) ([]byte, error) {
@@ -322,6 +359,7 @@ func (c *coderOpenAIWSClientConn) ReadMessage(ctx context.Context) ([]byte, erro
 
 	msgType, payload, err := c.conn.Read(ctx)
 	if err != nil {
+		c.wayviaRoute.ReportFailure(ctx, err)
 		return nil, err
 	}
 	switch msgType {
@@ -341,6 +379,7 @@ func (c *coderOpenAIWSClientConn) ReadFrame(ctx context.Context) (coderws.Messag
 	}
 	msgType, payload, err := c.conn.Read(ctx)
 	if err != nil {
+		c.wayviaRoute.ReportFailure(ctx, err)
 		return coderws.MessageText, nil, err
 	}
 	return msgType, payload, nil
@@ -350,15 +389,23 @@ func (c *coderOpenAIWSClientConn) WriteFrame(ctx context.Context, msgType coderw
 	if c == nil || c.conn == nil {
 		return errOpenAIWSConnClosed
 	}
+	if err := c.wayviaRoute.Check(); err != nil {
+		return err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return c.conn.Write(ctx, msgType, payload)
+	err := c.conn.Write(ctx, msgType, payload)
+	c.wayviaEvidence.Sent(c.wayviaRoute, ctx, err)
+	return err
 }
 
 func (c *coderOpenAIWSClientConn) Ping(ctx context.Context) error {
 	if c == nil || c.conn == nil {
 		return errOpenAIWSConnClosed
+	}
+	if err := c.wayviaRoute.Check(); err != nil {
+		return err
 	}
 	if ctx == nil {
 		ctx = context.Background()

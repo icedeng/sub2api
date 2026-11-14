@@ -18,6 +18,7 @@ import (
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 // Account management implementations
@@ -552,6 +553,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		if account.Type == AccountTypeOAuth {
 			switch account.Platform {
 			case PlatformOpenAI:
+				if wayviaegress.Configured() {
+					break
+				} // 扩展模式导入不隐式联网；由显式操作触发查询。
 				go func() {
 					defer func() {
 						if r := recover(); r != nil {
@@ -1290,6 +1294,11 @@ func (s *adminServiceImpl) resolveBulkUpdateTargetIDs(ctx context.Context, filte
 }
 
 func (s *adminServiceImpl) DeleteAccount(ctx context.Context, id int64) error {
+	if m := wayviaegress.Default(); m != nil {
+		if err := m.BeforeDelete(ctx, id); err != nil {
+			return err
+		}
+	}
 	// 级联删除 spark 影子账号（先删影子，再删母账号）
 	shadows, err := s.accountRepo.ListShadowsByParent(ctx, id)
 	if err != nil {
@@ -1674,6 +1683,7 @@ func (s *adminServiceImpl) ResetAccountQuota(ctx context.Context, id int64) erro
 // EnsureOpenAIPrivacy 检查 OpenAI OAuth 账号是否已设置 privacy_mode，
 // 未设置则调用 disableOpenAITraining 并持久化到 Extra，返回设置的 mode 值。
 func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Account) string {
+	ctx = wayviaegress.WithAccount(ctx, account.ID, "query")
 	// 影子账号不持凭据，隐私设置由母账号管理，直接跳过。
 	if account.IsCredentialShadow() {
 		return ""
@@ -1711,6 +1721,7 @@ func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Acc
 
 // ForceOpenAIPrivacy 强制重新设置 OpenAI OAuth 账号隐私，无论当前状态。
 func (s *adminServiceImpl) ForceOpenAIPrivacy(ctx context.Context, account *Account) string {
+	ctx = wayviaegress.WithAccount(ctx, account.ID, "query")
 	// 影子账号不持凭据,隐私由母账号管理,直接跳过(与 EnsureOpenAIPrivacy 一致——外审第4轮)。
 	if account.IsCredentialShadow() {
 		return ""

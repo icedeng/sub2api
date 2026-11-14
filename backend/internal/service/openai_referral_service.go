@@ -8,6 +8,7 @@ import (
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 const (
@@ -122,6 +123,7 @@ func (s *OpenAIQuotaService) referralCall(ctx context.Context, id int64, program
 }
 
 func (s *OpenAIQuotaService) QueryReferralEligibility(ctx context.Context, id int64) (*OpenAIReferralEligibility, error) {
+	ctx = wayviaegress.WithAccount(ctx, id, "query")
 	ctx = WithScopedAdminAccountOperation(ctx, scopedAccountOperation(ctx, "openai.referrals.read"))
 	account, err := s.referralAccount(ctx, id, false)
 	if err != nil {
@@ -163,6 +165,7 @@ type OpenAIReferralSendResult struct {
 }
 
 func (s *OpenAIQuotaService) SendReferralInvite(ctx context.Context, id int64, input OpenAIReferralSendRequest) (*OpenAIReferralSendResult, error) {
+	ctx = wayviaegress.WithAccount(ctx, id, "query")
 	ctx = WithScopedAdminAccountOperation(ctx, "openai.referrals.invite")
 	email := strings.TrimSpace(input.Email)
 	address, err := mail.ParseAddress(email)

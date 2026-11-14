@@ -20,6 +20,7 @@ import (
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 var (
@@ -163,6 +164,9 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+	if wayviaegress.Capability != "" {
+		return wayviaegress.Conflict("扩展版仅允许发布自建镜像，禁止原版二进制更新或回滚")
+	}
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
 		return err
@@ -281,6 +285,9 @@ func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []
 
 // Rollback restores the previous version
 func (s *UpdateService) Rollback() error {
+	if wayviaegress.Capability != "" {
+		return wayviaegress.Conflict("扩展版仅允许发布自建镜像，禁止原版二进制更新或回滚")
+	}
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
@@ -327,6 +334,9 @@ func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVer
 // The target must be one of the versions returned by ListRollbackVersions;
 // anything else (including the current version) is rejected.
 func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) error {
+	if wayviaegress.Capability != "" {
+		return wayviaegress.Conflict("扩展版仅允许发布自建镜像，禁止原版二进制更新或回滚")
+	}
 	target := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if target == "" {
 		return ErrRollbackVersionNotAllowed

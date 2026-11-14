@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"golang.org/x/net/proxy"
+
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 const (
@@ -52,7 +54,7 @@ var socks5ForwardDialer = &net.Dialer{
 //
 // 返回：
 //   - error: 代理配置错误（协议不支持或 dialer 创建失败）
-func ConfigureTransportProxy(transport *http.Transport, proxyURL *url.URL) error {
+func ConfigureTransportProxy(transport *http.Transport, proxyURL *url.URL, routes ...wayviaegress.Route) error {
 	if proxyURL == nil {
 		return nil
 	}
@@ -64,7 +66,7 @@ func ConfigureTransportProxy(transport *http.Transport, proxyURL *url.URL) error
 		return nil
 
 	case "socks5", "socks5h":
-		dialer, err := proxy.FromURL(proxyURL, socks5ForwardDialer)
+		dialer, err := proxy.FromURL(proxyURL, guardedForwardDialer{routes: routes})
 		if err != nil {
 			return fmt.Errorf("create socks5 dialer: %w", err)
 		}
@@ -83,4 +85,18 @@ func ConfigureTransportProxy(transport *http.Transport, proxyURL *url.URL) error
 	default:
 		return fmt.Errorf("unsupported proxy scheme: %s", scheme)
 	}
+}
+
+// 原始 TCP 源检查必须发生在 SOCKS 握手之前。
+type guardedForwardDialer struct{ routes []wayviaegress.Route }
+
+func (d guardedForwardDialer) Dial(network, addr string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, addr)
+}
+func (d guardedForwardDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	base := wayviaegress.GuardDial(socks5ForwardDialer.DialContext)
+	if len(d.routes) > 0 {
+		base = d.routes[0].Dial(base)
+	}
+	return base(ctx, network, addr)
 }

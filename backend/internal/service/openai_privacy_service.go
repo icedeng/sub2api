@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/imroc/req/v3"
+
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 // PrivacyClientFactory creates an HTTP client for privacy API calls.
@@ -45,7 +47,8 @@ func disableOpenAITraining(ctx context.Context, clientFactory PrivacyClientFacto
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	client, err := clientFactory(proxyURL)
+	ctx = wayviaegress.WithCredential(ctx, accessToken)
+	client, err := accountPrivacyClient(ctx, clientFactory, proxyURL)
 	if err != nil {
 		slog.Warn("openai_privacy_client_error", "error", err.Error())
 		return PrivacyModeFailed
@@ -123,7 +126,8 @@ func fetchChatGPTAccountInfo(ctx context.Context, clientFactory PrivacyClientFac
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	client, err := clientFactory(proxyURL)
+	ctx = wayviaegress.WithCredential(ctx, accessToken)
+	client, err := accountPrivacyClient(ctx, clientFactory, proxyURL)
 	if err != nil {
 		slog.Debug("chatgpt_account_check_client_error", "error", err.Error())
 		return nil
@@ -234,7 +238,8 @@ func fetchChatGPTSubscriptionExpiresAt(ctx context.Context, clientFactory Privac
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	client, err := clientFactory(proxyURL)
+	ctx = wayviaegress.WithCredential(ctx, accessToken)
+	client, err := accountPrivacyClient(ctx, clientFactory, proxyURL)
 	if err != nil {
 		slog.Debug("chatgpt_subscription_client_error", "error", err.Error())
 		return ""
@@ -368,4 +373,17 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + fmt.Sprintf("...(%d more)", len(s)-n)
+}
+
+var accountPrivacyClientFactory func(context.Context, string) (*req.Client, error)
+
+func SetAccountPrivacyClientFactory(factory func(context.Context, string) (*req.Client, error)) {
+	accountPrivacyClientFactory = factory
+}
+func accountPrivacyClient(ctx context.Context, fallback PrivacyClientFactory, proxyURL string) (*req.Client, error) {
+	id, _ := wayviaegress.AccountContext(ctx)
+	if id != 0 && accountPrivacyClientFactory != nil {
+		return accountPrivacyClientFactory(ctx, proxyURL)
+	}
+	return fallback(proxyURL)
 }

@@ -41,12 +41,15 @@ const (
 
 // OAuthSession stores OAuth flow state for OpenAI
 type OAuthSession struct {
-	State        string    `json:"state"`
-	CodeVerifier string    `json:"code_verifier"`
-	ClientID     string    `json:"client_id,omitempty"`
-	ProxyURL     string    `json:"proxy_url,omitempty"`
-	RedirectURI  string    `json:"redirect_uri"`
-	CreatedAt    time.Time `json:"created_at"`
+	ActorID       int64     `json:"-"`
+	AccountID     int64     `json:"account_id,omitempty"`
+	PolicyVersion int64     `json:"policy_version,omitempty"`
+	State         string    `json:"state"`
+	CodeVerifier  string    `json:"code_verifier"`
+	ClientID      string    `json:"client_id,omitempty"`
+	ProxyURL      string    `json:"proxy_url,omitempty"`
+	RedirectURI   string    `json:"redirect_uri"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // SessionStore manages OAuth sessions in memory
@@ -410,4 +413,16 @@ func (c *IDTokenClaims) GetUserInfo() *UserInfo {
 	}
 
 	return info
+}
+
+// Take 原子领取一次性授权会话，失败需要重新生成授权URL。
+func (s *SessionStore) Take(id string) (*OAuthSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.sessions[id]
+	if !ok || time.Since(v.CreatedAt) > SessionTTL {
+		return nil, false
+	}
+	delete(s.sessions, id)
+	return v, true
 }

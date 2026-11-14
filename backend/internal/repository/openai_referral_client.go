@@ -7,6 +7,7 @@ import (
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"github.com/imroc/req/v3"
 )
 
@@ -25,7 +26,13 @@ func NewOpenAIReferralClient(factory service.PrivacyClientFactory) service.OpenA
 }
 
 func (c *openAIReferralClient) request(ctx context.Context, call service.OpenAIReferralCall) (*req.Request, error) {
-	client, err := c.clientFactory(call.ProxyURL)
+	var client *req.Client
+	var err error
+	if id, _ := wayviaegress.AccountContext(ctx); id > 0 {
+		client, err = CreateAccountPrivacyReqClient(ctx, call.ProxyURL)
+	} else {
+		client, err = c.clientFactory(call.ProxyURL)
+	}
 	if err != nil {
 		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_REFERRAL_CLIENT_ERROR", "failed to build referral client")
 	}

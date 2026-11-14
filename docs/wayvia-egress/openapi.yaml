@@ -1,0 +1,324 @@
+openapi: 3.0.3
+info:
+  title: Wayvia OAuth IPv6 Egress Extension
+  version: 1.0.0
+  description: >-
+    单机单活扩展。所有接口要求管理员JWT；受限管理密钥禁止访问。
+    写操作遵循系统step_up_enabled开关；开启时额外要求当前浏览器会话具有TOTP step-up授权，
+    通过现有POST /api/v1/user/totp/step-up {code} 获取并复用15分钟有效期，关闭时不要求额外验证码。
+    管理员认证及账号身份校验始终保留，机器凭据禁止写入。
+    GET只读。202是已接受，需查询操作及绑定ready，不代表网络准备完成。
+servers:
+  - url: /api/v1/admin/wayvia-egress
+security:
+  - AdminJWT: []
+paths:
+  /status:
+    get:
+      summary: 读取配置、全局revision、状态计数和最近20条操作
+      responses:
+        '200':
+          description: data含capability、configured、error、runtime、prefix、node_id、interface、counts、operations、supported_purposes
+  /bindings:
+    get:
+      summary: 读取OAuth绑定（影子继承，仅管理员可见）
+      parameters:
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 50}}
+        - {name: q, in: query, description: 账号名称或地址, schema: {type: string}}
+        - {name: state, in: query, schema: {type: string}}
+        - {name: account_id, in: query, schema: {type: integer, format: int64}}
+        - {name: account_ids, in: query, description: 逗号分隔最多200个正整数ID, schema: {type: string}}
+      responses:
+        '200':
+          description: data含items、total、page、page_size；items为Binding
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: integer}
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: {$ref: '#/components/schemas/Binding'}
+                      total: {type: integer}
+                      page: {type: integer}
+                      page_size: {type: integer}
+  /operations/{id}:
+    get:
+      summary: 读取操作阶段和脱敏错误
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {$ref: '#/components/responses/Operation'}
+        '404': {description: 操作不存在}
+  /runtime:
+    put:
+      summary: 暂停或恢复固定 IPv6 服务（按系统开关验证step-up；不自动启用新账号）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/Mutation'}
+                - type: object
+                  required: [enabled, expected_revision]
+                  properties:
+                    enabled: {type: boolean}
+                    expected_revision: {type: integer, format: int64}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '403': {$ref: '#/components/responses/StepUp'}
+  /accounts/{id}/mode:
+    put:
+      summary: 启用固定 IPv6、重新核验或恢复原有出口（按系统开关验证step-up）
+      parameters: [{$ref: '#/components/parameters/AccountID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/AccountMutation'}
+                - type: object
+                  required: [mode]
+                  properties:
+                    mode: {type: string, enum: [legacy, strict_ipv6]}
+                    enable_scheduling: {type: boolean, default: false, description: 仅 mode=strict_ipv6 可用；固定地址核验成功后在同一事务中开放此母账号调度，仍为 active 的账号才生效，不修改影子账号或 status}
+                    acknowledge_legacy_egress: {type: boolean, description: 退出legacy时必须true}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '403': {$ref: '#/components/responses/StepUp'}
+  /accounts/{id}/evidence:
+    get:
+      summary: 读取实际业务连接证据（本机 socket，非上游观测）
+      description: 母账号返回同 owner 的记录，影子仅返回自身请求。异步有界滚动记录，最长7天，每owner最多200条，全站50000条，每分钟清理，不是完整审计。没有记录不能证明没有请求。
+      parameters:
+        - {$ref: '#/components/parameters/AccountID'}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+      responses:
+        '200':
+          description: 连接记录及保存状态；缺少实际连接时 source_ipv6 为空，不用配置值补齐
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: integer}
+                  data:
+                    type: object
+                    properties:
+                      items: {type: array, items: {$ref: '#/components/schemas/Evidence'}}
+                      dropped_since_start: {type: integer, description: 本次进程启动以来全站队列满或写入失败的记录数}
+                      persistence_unavailable: {type: boolean}
+                      pending: {type: integer, description: 当前全站内存队列长度}
+        '400': {description: 无效账号ID或数量越界}
+        '403': {description: 非管理员或受限管理密钥}
+  /accounts/{id}/probe:
+    post:
+      summary: 固定无凭据回显探测（按系统开关验证step-up、30秒间隔、暂停时禁止）
+      parameters: [{$ref: '#/components/parameters/AccountID'}]
+      requestBody: {$ref: '#/components/requestBodies/AccountMutation'}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /accounts/{id}/rotate:
+    post:
+      summary: 停流后分配下一绑定版本（按系统开关验证step-up）
+      parameters: [{$ref: '#/components/parameters/AccountID'}]
+      requestBody: {$ref: '#/components/requestBodies/AccountMutation'}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /accounts/{id}/history:
+    get:
+      summary: 只读本owner历史绑定
+      parameters: [{$ref: '#/components/parameters/AccountID'}]
+      responses:
+        '200': {description: data为数组，每项binding_id、source_ipv6、binding_version、state；不含凭据}
+  /accounts/{id}/restore-binding:
+    post:
+      summary: 显式恢复原owner的active或retained绑定（按系统开关验证step-up）
+      description: 可在全局暂停或凭据待确认时核验地址；不解除凭据待确认、不开放暂停业务。
+      parameters: [{$ref: '#/components/parameters/AccountID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/AccountMutation'}
+                - type: object
+                  required: [binding_id]
+                  properties:
+                    binding_id: {type: string, format: uuid}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /retired-accounts:
+    get:
+      summary: 最近200个可恢复的软删除母账号
+      responses:
+        '200': {description: data数组包含account_id、name、owner_id、policy_version、binding_id；不包含凭据}
+  /accounts/{id}/restore-account:
+    post:
+      summary: 恢复原软删除记录，保留owner和绑定（按系统开关验证step-up）
+      description: 事务完成后仍disabled且credential_uncertain；不恢复影子、分组或计划任务。
+      parameters: [{$ref: '#/components/parameters/AccountID'}]
+      requestBody: {$ref: '#/components/requestBodies/AccountMutation'}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /accounts/{id}/retire:
+    post:
+      summary: 停流退役后允许原账号删除（按系统开关验证step-up）
+      parameters: [{$ref: '#/components/parameters/AccountID'}]
+      requestBody: {$ref: '#/components/requestBodies/AccountMutation'}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+  /reauth/generate-auth-url:
+    post:
+      summary: 生成绑定管理员、账号和策略版本的一次性授权会话（按系统开关验证step-up）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account_id]
+              properties:
+                account_id: {type: integer, format: int64, minimum: 1}
+      responses:
+        '200': {description: data含auth_url、session_id；会话有效期30分钟、仅在当前进程保存}
+        '403': {$ref: '#/components/responses/StepUp'}
+  /reauth/exchange-code:
+    post:
+      summary: 一次性兑换并CAS保存原身份凭据（按系统开关验证step-up）
+      description: 必须由创建会话的同一管理员兑换，不能改代理；严格账号预检后由固定地址POST，最长120秒网络加保存预算，客户端建议150秒超时。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id, code, state]
+              properties:
+                session_id: {type: string}
+                code: {type: string}
+                state: {type: string}
+      responses:
+        '200': {description: data含persisted=true及message，不返回Token；严格账号仍需恢复核验}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {description: 预检失败或凭据待确认，禁止盲目重放code/旧RT}
+components:
+  securitySchemes:
+    AdminJWT: {type: http, scheme: bearer, bearerFormat: JWT}
+  parameters:
+    AccountID: {name: id, in: path, required: true, schema: {type: integer, format: int64, minimum: 1}}
+  requestBodies:
+    AccountMutation:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AccountMutation'}
+  responses:
+    Operation:
+      description: 操作记录；phase为accepted/draining/preparing/completed/failed
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code: {type: integer, example: 0}
+              message: {type: string}
+              data: {$ref: '#/components/schemas/Operation'}
+    Conflict: {description: 版本、幂等键、身份、代理、插件或操作冲突；刷新状态后用新幂等键重试。原请求重试必须保持原幂等键和全部字段。}
+    StepUp: {description: STEP_UP_REQUIRED / STEP_UP_TOTP_NOT_ENABLED / STEP_UP_ADMIN_API_KEY_FORBIDDEN / STEP_UP_MCP_OAUTH_FORBIDDEN}
+  schemas:
+    Mutation:
+      type: object
+      required: [idempotency_key, acknowledge_stream_interrupt]
+      properties:
+        idempotency_key: {type: string, minLength: 8, maxLength: 128}
+        acknowledge_stream_interrupt: {type: boolean, enum: [true]}
+    AccountMutation:
+      allOf:
+        - {$ref: '#/components/schemas/Mutation'}
+        - type: object
+          required: [expected_policy_version]
+          properties:
+            expected_policy_version: {type: integer, format: int64}
+    Operation:
+      type: object
+      properties:
+        operation_id: {type: string, format: uuid}
+        owner_id: {type: string, format: uuid}
+        kind: {type: string}
+        target: {type: string}
+        phase: {type: string, enum: [accepted, draining, preparing, completed, failed]}
+        error: {type: string}
+        created_at: {type: string, format: date-time}
+        finished_at: {type: string, format: date-time, nullable: true}
+    Evidence:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        account_id: {type: integer, format: int64}
+        occurred_at: {type: string, format: date-time}
+        request_id: {type: string, format: uuid, description: 同次HTTP响应头与流结束共用编号，WS为单条消息编号}
+        connection_id: {type: string, description: 本机TCP连接编号；TLS及WS复用保持同一编号，无法匹配时为空}
+        purpose: {type: string, enum: [business, query, refresh, prewarm, reauth]}
+        protocol: {type: string, enum: [HTTP, SSE, WS]}
+        event: {type: string, enum: [response_headers, body_eof, stream_failed, request_failed, ws_handshake, ws_message_sent, ws_send_failed, connection_unavailable]}
+        source_ipv6: {type: string, description: 实际socket源地址，未取得时为空}
+        remote_address: {type: string, description: 实际对端地址及端口}
+        target_host: {type: string, description: 仅hostname，不含路径或查询参数}
+        reused: {type: boolean, description: HTTP连接复用或WS连接上的后续消息}
+        policy_version: {type: integer, format: int64}
+        binding_version: {type: integer, format: int64}
+        http_status: {type: integer, description: 无HTTP响应时为0}
+        error_code: {type: string, description: 脱敏错误代码，不含上游正文}
+    Binding:
+      type: object
+      properties:
+        account_id: {type: integer, format: int64}
+        parent_account_id: {type: integer, format: int64}
+        name: {type: string}
+        owner_id: {type: string, format: uuid}
+        inherited: {type: boolean}
+        current_mode: {type: string, enum: [legacy, strict_ipv6]}
+        target_mode: {type: string, enum: [legacy, strict_ipv6]}
+        state: {type: string, enum: [pending_enrollment, legacy, preparing, ready, pausing, paused, blocked, credential_uncertain, retired]}
+        require_ipv6: {type: boolean, description: 必须使用固定 IPv6；不能切回 legacy。新独立 OAuth 默认 true，新影子继承并锁定母账号要求}
+        auto_enrollment:
+          type: string
+          enum: [queued, running, retry, blocked, completed, cancelled]
+          description: 首次启用持久任务状态；新账号导入后暂停调度并自动配置，核验成功后自动开放调度。历史账号可不返回此字段
+        auto_retry_at:
+          type: string
+          format: date-time
+          description: 自动任务处于 retry 时的最早重试时间；总开关关闭或其他操作执行中时继续等待
+        recovery_state: {type: string, enum: [retry, running, blocked, completed, cancelled]}
+        recovery_attempts: {type: integer}
+        recovery_retry_at: {type: string, format: date-time, description: 最早重试时间；账号/全局暂停时等待}
+        recovered_at: {type: string, format: date-time}
+        recovery_error: {type: string, description: 恢复任务最近的脱敏原因}
+        schedulable: {type: boolean, description: 账号调度开关；true 不替代 ready 与全局开关等门控}
+        account_status: {type: string, description: 原账号状态；启用固定出口不改变此值}
+        ready: {type: boolean, description: 本次进程核验通过且未暂停}
+        can_enroll: {type: boolean}
+        unsupported_reason: {type: string}
+        policy_version: {type: integer, format: int64}
+        binding_version: {type: integer, format: int64}
+        binding_id: {type: string, format: uuid}
+        binding_state: {type: string, enum: [pending, active, retained]}
+        source_ipv6: {type: string, format: ipv6}
+        observed_ipv6: {type: string, format: ipv6}
+        observed_at: {type: string, format: date-time, nullable: true}
+        last_error: {type: string}

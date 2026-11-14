@@ -549,6 +549,12 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/wayvia-egress',
+    name: 'AdminWayviaEgress',
+    component: () => import('@/views/admin/WayviaEgressView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true, title: 'OAuth 固定 IPv6 出口' }
+  },
+  {
     path: '/admin/plugins',
     name: 'AdminPlugins',
     component: () => import('@/views/admin/PluginsView.vue'),

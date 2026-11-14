@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"log/slog"
+
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 type accountCredentialsUpdater interface {
@@ -23,6 +25,9 @@ func persistAccountCredentials(ctx context.Context, repo AccountRepository, acco
 		return nil
 	}
 
+	if wayviaegress.ControlledRefresh(account.ID) {
+		return wayviaegress.Conflict("固定 IPv6 账号凭据只能经受控刷新或重新授权保存")
+	}
 	account.Credentials = shallowCopyMap(credentials)
 	if updater, ok := any(repo).(accountCredentialsUpdater); ok {
 		return updater.UpdateCredentials(ctx, account.ID, account.Credentials)

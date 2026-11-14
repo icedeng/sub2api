@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 // OAuthRefreshExecutor 各平台实现的 OAuth 刷新执行器
@@ -179,6 +181,22 @@ func (api *OAuthRefreshAPI) RefreshIfNeeded(
 	}
 	if executor == nil {
 		return nil, errors.New("oauth refresh executor is nil")
+	}
+	if wayviaegress.ControlledRefresh(account.ID) {
+		if !executor.CanRefresh(account) || !executor.NeedsRefresh(account, refreshWindow) {
+			return &OAuthRefreshResult{Account: account}, nil
+		}
+		credentials, err := executor.Refresh(ctx, account)
+		if err != nil {
+			return nil, err
+		}
+		readCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		fresh, err := api.accountRepo.GetByID(readCtx, account.ID)
+		if err != nil {
+			return nil, err
+		}
+		return &OAuthRefreshResult{Account: fresh, NewCredentials: credentials, Refreshed: true}, nil
 	}
 	requestPath := isOAuthRefreshRequestPath(ctx)
 	cacheKey := executor.CacheKey(account)

@@ -1,0 +1,32 @@
+[Unit]
+Description=Wayvia approved IPv6 address agent
+After=network-online.target
+Wants=network-online.target
+Before=docker.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/libexec/wayvia-egress-agent --config /etc/wayvia-egress/config.json
+# 等待本地 socket 能响应；root 收到 403 属于正常权限拒绝，不发送地址操作。
+ExecStartPost=/usr/bin/timeout 10s /bin/sh -c 'until /usr/bin/curl --disable --silent --output /dev/null --max-time 1 --noproxy "*" --unix-socket /run/wayvia-egress/agent.sock http://localhost/; do sleep 0.1; done'
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=wayvia-egress
+RuntimeDirectoryMode=0750
+# 保留目录 inode，避免服务重启后 Docker 的目录挂载指向已删除目录。
+RuntimeDirectoryPreserve=yes
+StateDirectory=wayvia-egress/agent
+StateDirectoryMode=0700
+UMask=0027
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET6 AF_INET
+ReadWritePaths=/run/wayvia-egress /var/lib/wayvia-egress/agent
+
+[Install]
+WantedBy=multi-user.target docker.service

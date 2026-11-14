@@ -26,6 +26,12 @@
         <p class="input-hint">{{ t('admin.accounts.notesHint') }}</p>
       </div>
 
+      <section v-if="account.platform === 'openai' && account.type === 'oauth'" class="rounded-lg border p-3 text-sm">
+        <p class="font-medium">账号出口</p>
+        <p v-if="account.parent_account_id">继承母账号 #{{ account.parent_account_id }}，影子账号不能单独修改出口。</p>
+        <p v-else>新账号由系统自动配置固定 IPv6，核验成功后自动开放调度；失败时保持暂停并显示原因。</p>
+        <RouterLink class="text-primary-600" :to="{ path: '/admin/wayvia-egress', query: { account: account.parent_account_id || account.id } }">查看绑定并配置出口模式</RouterLink>
+      </section>
       <!-- API Key fields (only for apikey type) -->
       <div v-if="account.type === 'apikey'" class="space-y-4">
         <div v-if="!isCNApiKeyAccount || editApiProtocol !== 'adaptive'">

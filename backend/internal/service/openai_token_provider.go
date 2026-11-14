@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 const (
@@ -132,6 +134,18 @@ func (p *OpenAITokenProvider) ensureMetrics() {
 
 // GetAccessToken returns a valid access_token.
 func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Account) (string, error) {
+	if account != nil && wayviaegress.ControlledRefresh(account.ID) {
+		if err := wayviaegress.CheckAccount(account.ID); err != nil {
+			return "", err
+		}
+		if p.accountRepo != nil {
+			fresh, err := p.accountRepo.GetByID(ctx, account.ID)
+			if err != nil {
+				return "", err
+			}
+			account = fresh
+		}
+	}
 	p.ensureMetrics()
 	if account == nil {
 		return "", errors.New("account is nil")
@@ -143,7 +157,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	cacheKey := OpenAITokenCacheKey(account)
 
 	// 1) Try cache first.
-	if p.tokenCache != nil {
+	if p.tokenCache != nil && !wayviaegress.ControlledRefresh(account.ID) {
 		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
 			slog.Debug("openai_token_cache_hit", "account_id", account.ID)
 			return token, nil

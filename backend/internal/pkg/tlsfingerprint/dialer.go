@@ -14,6 +14,8 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/proxy"
+
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 // Profile contains TLS fingerprint configuration.
@@ -43,6 +45,7 @@ type Dialer struct {
 type HTTPProxyDialer struct {
 	profile  *Profile
 	proxyURL *url.URL
+	routes   []wayviaegress.Route
 }
 
 // SOCKS5ProxyDialer creates TLS connections through SOCKS5 proxies with custom fingerprints.
@@ -50,6 +53,7 @@ type HTTPProxyDialer struct {
 type SOCKS5ProxyDialer struct {
 	profile  *Profile
 	proxyURL *url.URL
+	routes   []wayviaegress.Route
 }
 
 // Default TLS fingerprint values captured from Claude Code (Node.js 24.x)
@@ -121,21 +125,21 @@ var (
 // If baseDialer is nil, direct TCP dial is used.
 func NewDialer(profile *Profile, baseDialer func(ctx context.Context, network, addr string) (net.Conn, error)) *Dialer {
 	if baseDialer == nil {
-		baseDialer = (&net.Dialer{}).DialContext
+		baseDialer = wayviaegress.GuardDial((&net.Dialer{}).DialContext)
 	}
 	return &Dialer{profile: profile, baseDialer: baseDialer}
 }
 
 // NewHTTPProxyDialer creates a new TLS fingerprint dialer that works through HTTP/HTTPS proxies.
 // It establishes a CONNECT tunnel before performing TLS handshake with custom fingerprint.
-func NewHTTPProxyDialer(profile *Profile, proxyURL *url.URL) *HTTPProxyDialer {
-	return &HTTPProxyDialer{profile: profile, proxyURL: proxyURL}
+func NewHTTPProxyDialer(profile *Profile, proxyURL *url.URL, routes ...wayviaegress.Route) *HTTPProxyDialer {
+	return &HTTPProxyDialer{profile: profile, proxyURL: proxyURL, routes: routes}
 }
 
 // NewSOCKS5ProxyDialer creates a new TLS fingerprint dialer that works through SOCKS5 proxies.
 // It establishes a SOCKS5 tunnel before performing TLS handshake with custom fingerprint.
-func NewSOCKS5ProxyDialer(profile *Profile, proxyURL *url.URL) *SOCKS5ProxyDialer {
-	return &SOCKS5ProxyDialer{profile: profile, proxyURL: proxyURL}
+func NewSOCKS5ProxyDialer(profile *Profile, proxyURL *url.URL, routes ...wayviaegress.Route) *SOCKS5ProxyDialer {
+	return &SOCKS5ProxyDialer{profile: profile, proxyURL: proxyURL, routes: routes}
 }
 
 // DialTLSContext establishes a TLS connection through SOCKS5 proxy with the configured fingerprint.
@@ -160,7 +164,7 @@ func (d *SOCKS5ProxyDialer) DialTLSContext(ctx context.Context, network, addr st
 		proxyAddr = net.JoinHostPort(d.proxyURL.Hostname(), "1080") // Default SOCKS5 port
 	}
 
-	socksDialer, err := proxy.SOCKS5("tcp", proxyAddr, auth, proxy.Direct)
+	socksDialer, err := proxy.SOCKS5("tcp", proxyAddr, auth, guardedTCPDialer{routes: d.routes})
 	if err != nil {
 		slog.Debug("tls_fingerprint_socks5_dialer_failed", "error", err)
 		return nil, fmt.Errorf("create SOCKS5 dialer: %w", err)
@@ -168,7 +172,7 @@ func (d *SOCKS5ProxyDialer) DialTLSContext(ctx context.Context, network, addr st
 
 	// Step 2: Establish SOCKS5 tunnel to target
 	slog.Debug("tls_fingerprint_socks5_establishing_tunnel", "target", addr)
-	conn, err := socksDialer.Dial("tcp", addr)
+	conn, err := socksDialer.(proxy.ContextDialer).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		slog.Debug("tls_fingerprint_socks5_connect_failed", "error", err)
 		return nil, fmt.Errorf("SOCKS5 connect: %w", err)
@@ -198,7 +202,11 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 	}
 
 	dialer := &net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
+	base := wayviaegress.GuardDial(dialer.DialContext)
+	if len(d.routes) > 0 {
+		base = d.routes[0].Dial(base)
+	}
+	conn, err := base(ctx, "tcp", proxyAddr)
 	if err != nil {
 		slog.Debug("tls_fingerprint_http_proxy_connect_failed", "error", err)
 		return nil, fmt.Errorf("connect to proxy: %w", err)
@@ -463,4 +471,17 @@ func toUint8s(vals []uint16) []uint8 {
 		out[i] = uint8(v)
 	}
 	return out
+}
+
+type guardedTCPDialer struct{ routes []wayviaegress.Route }
+
+func (d guardedTCPDialer) Dial(network, addr string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, addr)
+}
+func (d guardedTCPDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	base := wayviaegress.GuardDial((&net.Dialer{}).DialContext)
+	if len(d.routes) > 0 {
+		base = d.routes[0].Dial(base)
+	}
+	return base(ctx, network, addr)
 }

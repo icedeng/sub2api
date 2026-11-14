@@ -12,6 +12,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 // tokenRefreshTempUnschedDuration token 刷新重试耗尽后临时不可调度的持续时间
@@ -906,8 +907,18 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 			}
 			attemptTimedOut := errors.Is(attemptCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 			if err == nil && newCredentials != nil && !attemptTimedOut {
-				newCredentials["_token_version"] = time.Now().UnixMilli()
-				if saveErr := persistAccountCredentials(attemptCtx, s.accountRepo, account, newCredentials); saveErr != nil {
+				if wayviaegress.ControlledRefresh(account.ID) {
+					credentialsPersisted = true
+					newCredentials = nil
+				} else {
+					newCredentials["_token_version"] = time.Now().UnixMilli()
+				}
+				if saveErr := func() error {
+					if credentialsPersisted {
+						return nil
+					}
+					return persistAccountCredentials(attemptCtx, s.accountRepo, account, newCredentials)
+				}(); saveErr != nil {
 					err = fmt.Errorf("failed to save credentials: %w", saveErr)
 				} else {
 					credentialsPersisted = true
@@ -959,6 +970,9 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 		}
 		if errors.Is(err, errRefreshSkipped) {
 			return errRefreshSkipped
+		}
+		if wayviaegress.ControlledRefresh(account.ID) && strings.HasPrefix(infraerrors.Reason(err), "EGRESS_") {
+			return err
 		}
 		if isProviderScopedTerminalRefreshError(err) {
 			return err
@@ -1158,6 +1172,11 @@ func (s *TokenRefreshService) retryBackoff(accountID int64, attempt int) time.Du
 
 // postRefreshActions 刷新成功后的后续动作（清除错误状态、缓存失效、调度器同步等）
 func (s *TokenRefreshService) postRefreshActions(ctx context.Context, account *Account) {
+	if account != nil && wayviaegress.ControlledRefresh(account.ID) {
+		// CAS/outbox已提交；只失效缓存，不清除管理员刚设置的暂停/调度状态。
+		s.postRefreshStateSync(ctx, account)
+		return
+	}
 	s.clearAntigravityForceTokenRefresh(ctx, account, "success")
 
 	// Antigravity 账户：如果之前是因为缺少 project_id 而标记为 error，现在成功获取到了，清除错误状态
@@ -1227,6 +1246,10 @@ func (s *TokenRefreshService) postRefreshStateSync(ctx context.Context, account 
 		} else {
 			slog.Debug("token_refresh.token_cache_invalidated", "account_id", account.ID)
 		}
+	}
+	// 受控刷新通过同一CAS事务中的outbox发布快照，禁止旧对象覆盖新凭据或暂停状态。
+	if wayviaegress.ControlledRefresh(account.ID) {
+		return
 	}
 	// 同步更新调度器缓存，确保调度获取的 Account 对象包含最新的 credentials
 	if s.schedulerCache != nil {

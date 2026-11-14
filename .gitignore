@@ -34,6 +34,7 @@ backend/.gocache/
 # ===================
 node_modules/
 frontend/node_modules/
+.pnpm-store/
 frontend/dist/
 *.local
 *.tsbuildinfo
@@ -133,6 +134,8 @@ deploy/docker-compose.override.yml
 .gocache/
 vite.config.js
 docs/*
+!docs/wayvia-egress/
+!docs/wayvia-egress/**
 !docs/agent-resource-safety.md
 !docs/moego-json-batching.md
 !docs/admin-api-keys.md
@@ -166,3 +169,7 @@ issues/
 .vite/
 # 本地闭源插件开发目录及构建产物不进入 Sub2API 仓库
 /plugins/
+
+# Wayvia运行目录及本机秘密
+deploy/wayvia/.env
+deploy/wayvia/data/

@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/typesafe"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 )
 
 type Account struct {
@@ -192,6 +193,9 @@ func (a *Account) EffectiveLoadFactor() int {
 }
 
 func (a *Account) IsSchedulable() bool {
+	if a.Platform == PlatformOpenAI && a.Type == AccountTypeOAuth && wayviaegress.CheckAccount(a.ID) != nil {
+		return false
+	}
 	if !a.IsActive() || !a.Schedulable {
 		return false
 	}

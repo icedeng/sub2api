@@ -1,7 +1,9 @@
 package repository
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -9,16 +11,19 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 
 	"github.com/imroc/req/v3"
 )
 
 // reqClientOptions 定义 req 客户端的构建参数
 type reqClientOptions struct {
-	ProxyURL    string        // 代理 URL（支持 http/https/socks5）
-	Timeout     time.Duration // 请求超时时间
-	Impersonate bool          // 是否模拟浏览器指纹（当前为 Firefox，Chrome 伪装会被 chatgpt.com 的 Cloudflare 质询）
-	ForceHTTP2  bool          // 是否强制使用 HTTP/2
+	Route         *wayviaegress.Route
+	TokenExchange bool
+	ProxyURL      string        // 代理 URL（支持 http/https/socks5）
+	Timeout       time.Duration // 请求超时时间
+	Impersonate   bool          // 是否模拟浏览器指纹（当前为 Firefox，Chrome 伪装会被 chatgpt.com 的 Cloudflare 质询）
+	ForceHTTP2    bool          // 是否强制使用 HTTP/2
 }
 
 // sharedReqClients 存储按配置参数缓存的 req 客户端实例
@@ -39,6 +44,12 @@ var sharedReqClients sync.Map
 // 性能优化：相同配置复用同一客户端，避免重复创建
 func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 	key := buildReqClientKey(opts)
+	if opts.Route != nil {
+		key += "|" + opts.Route.Key()
+	}
+	if opts.TokenExchange {
+		key += "|token"
+	}
 	if cached, ok := sharedReqClients.Load(key); ok {
 		if c, ok := cached.(*req.Client); ok {
 			return c, nil
@@ -64,9 +75,38 @@ func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 	if trimmed != "" {
 		client.SetProxyURL(trimmed)
 	}
+	base := wayviaegress.GuardDial((&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext)
+	if opts.Route != nil {
+		if opts.Route.Strict() && trimmed != "" {
+			return nil, wayviaegress.Error("EGRESS_PROXY_CONFLICT", "固定IPv6禁止代理")
+		}
+		base = opts.Route.Dial(base)
+		if opts.Route.Strict() {
+			client.SetProxy(nil)
+			client.DisableHTTP3()
+		}
+		route := *opts.Route
+		client.GetTransport().WrapRoundTripFunc(func(rt http.RoundTripper) req.HttpRoundTripFunc {
+			return wayviaegress.WrapTransport(rt, route).RoundTrip
+		})
+	}
+	client.SetDial(base)
+	if opts.Route != nil && opts.Route.Strict() {
+		// req 的 HTTP/2 新建/重连可能绕过 SetDial；TLS 入口也必须绑定同一出口。
+		client.SetDialTLS(wayviaegress.TLSDial(base, client.GetTLSClientConfig(), client.GetTransport().TLSHandshakeContext))
+	}
+	if opts.TokenExchange {
+		client.SetRedirectPolicy(req.NoRedirectPolicy())
+		client.SetCommonRetryCount(0)
+	}
 	client = instrumentReqClient(client)
 
-	actual, _ := sharedReqClients.LoadOrStore(key, client)
+	actual, loaded := sharedReqClients.LoadOrStore(key, client)
+	if loaded {
+		client.GetTransport().CloseIdleConnections()
+	} else if opts.Route != nil {
+		opts.Route.OnInvalidated(func() { sharedReqClients.CompareAndDelete(key, client); client.GetTransport().CloseIdleConnections() })
+	}
 	if c, ok := actual.(*req.Client); ok {
 		return c, nil
 	}
@@ -102,4 +142,19 @@ func CreatePrivacyReqClient(proxyURL string) (*req.Client, error) {
 		Timeout:     30 * time.Second,
 		Impersonate: true, // Enable browser TLS fingerprint impersonation (Firefox, see getSharedReqClient)
 	})
+}
+
+func CreateAccountPrivacyReqClient(ctx context.Context, proxyURL string) (*req.Client, error) {
+	id, purpose := wayviaegress.AccountContext(ctx)
+	if id < 0 {
+		return nil, wayviaegress.Error("EGRESS_ACCOUNT_CONTEXT_REQUIRED", "查询凭据缺少可信账号上下文")
+	}
+	if id == 0 {
+		return CreatePrivacyReqClient(proxyURL)
+	}
+	route, err := wayviaegress.Resolve(id, purpose)
+	if err != nil {
+		return nil, err
+	}
+	return getSharedReqClient(reqClientOptions{ProxyURL: proxyURL, Timeout: 30 * time.Second, Impersonate: true, Route: &route})
 }

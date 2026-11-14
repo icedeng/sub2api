@@ -47,6 +47,7 @@
         <!-- Tab: Security — Admin API Key -->
         <div v-show="activeTab === 'security'" class="space-y-6">
           <AdminAccessKeysSettings />
+          <WayviaRuntimeControl />
           <!-- 已有全权密钥只提供轮换和删除入口。 -->
           <details v-if="adminApiKeyExists" class="card">
             <summary class="cursor-pointer px-6 py-4 font-medium">{{ t("adminAccessKeys.legacy") }}</summary>
@@ -9012,6 +9013,7 @@ import {
   isStepUpBlocked,
   stepUpBlockReason,
 } from "@/composables/useStepUp";
+import WayviaRuntimeControl from "@/components/admin/WayviaRuntimeControl.vue";
 import AdminAccessKeysSettings from "@/components/admin/settings/AdminAccessKeysSettings.vue";
 import TotpStepUpDialog from "@/components/auth/TotpStepUpDialog.vue";
 import { affiliatesAPI, type AffiliateAdminEntry, type SimpleUser as AffiliateSimpleUser } from "@/api/admin/affiliates";

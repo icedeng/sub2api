@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	coderws "github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -264,6 +265,9 @@ func (s *OpenAIGatewayService) createUpstreamLiveCall(
 	request *LiveCallRequest,
 	attestation string,
 ) (*LiveCallCreated, error) {
+	if account != nil && wayviaegress.IsStrict(account.ID) {
+		return nil, wayviaegress.Error("EGRESS_PATH_UNSUPPORTED", "该可选能力尚未完成固定IPv6链路适配")
+	}
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
 		logLiveCreateStageFailure(ctx, account.ID, "access_token", err)
@@ -439,6 +443,10 @@ func (s *OpenAIGatewayService) liveSidebandHeaders(
 }
 
 func (s *OpenAIGatewayService) dialLiveSideband(ctx context.Context, record *LiveCallRecord) (liveFrameConn, error) {
+	if wayviaegress.IsStrict(record.AccountID) {
+		return nil, wayviaegress.Error("EGRESS_PATH_UNSUPPORTED", "严格账号暂不支持Live")
+	}
+	ctx = wayviaegress.WithAccount(ctx, record.AccountID, "business")
 	account, err := s.accountRepo.GetByID(ctx, record.AccountID)
 	if err != nil {
 		return nil, err

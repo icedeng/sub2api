@@ -29,6 +29,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"github.com/lib/pq"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -126,6 +127,7 @@ func newAccountRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor, schedul
 }
 
 func (r *accountRepository) Create(ctx context.Context, account *service.Account) error {
+	defer wayviaReloadAfterCommit(ctx)
 	if scoped := r.accountTransactionScope(ctx); scoped != r {
 		return scoped.Create(ctx, account)
 	}
@@ -141,6 +143,10 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 func createAccountRecord(ctx context.Context, client *dbent.Client, account *service.Account) error {
 	if account == nil {
 		return service.ErrAccountNilInput
+	}
+	// Ent 创建结果主要来自输入，显式暂停以与数据库触发器和 API 返回值一致。
+	if account.Platform == service.PlatformOpenAI && account.Type == service.AccountTypeOAuth && account.ParentAccountID == nil {
+		account.Schedulable = false
 	}
 
 	builder := client.Account.Create().
@@ -203,6 +209,7 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 	}
 
 	account.ID = created.ID
+	account.Schedulable = created.Schedulable
 	account.CreatedAt = created.CreatedAt
 	account.UpdatedAt = created.UpdatedAt
 	return nil
@@ -211,6 +218,7 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 // CreateWithAccountGroups atomically persists an account, its exact per-group priorities,
 // and the scheduler outbox event used to publish the new routing snapshot.
 func (r *accountRepository) CreateWithAccountGroups(ctx context.Context, account *service.Account, groups []service.AccountGroup) error {
+	defer wayviaReloadAfterCommit(ctx)
 	if account == nil {
 		return service.ErrAccountNilInput
 	}
@@ -472,6 +480,7 @@ func (r *accountRepository) updateAccount(
 	explicitRateSyncEnabled *bool,
 	explicitRateMultiplier *float64,
 ) error {
+	defer wayviaReloadAfterCommit(ctx)
 	if account == nil {
 		return nil
 	}
@@ -872,6 +881,7 @@ func decodeAccountExtraJSON(raw []byte) (any, bool, error) {
 }
 
 func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, credentials map[string]any) error {
+	defer wayviaReloadAfterCommit(ctx)
 	payload, err := json.Marshal(normalizeJSONMap(credentials))
 	if err != nil {
 		return err
@@ -989,6 +999,7 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 }
 
 func (r *accountRepository) Delete(ctx context.Context, id int64) error {
+	defer wayviaReloadAfterCommit(ctx)
 	if scoped := r.accountTransactionScope(ctx); scoped != r {
 		return scoped.Delete(ctx, id)
 	}
@@ -2728,6 +2739,7 @@ func (r *accountRepository) UpdateSessionWindowEnd(ctx context.Context, id int64
 }
 
 func (r *accountRepository) SetSchedulable(ctx context.Context, id int64, schedulable bool) error {
+	defer wayviaReloadAfterCommit(ctx)
 	if scoped := r.accountTransactionScope(ctx); scoped != r {
 		return scoped.SetSchedulable(ctx, id, schedulable)
 	}
@@ -2736,7 +2748,7 @@ func (r *accountRepository) SetSchedulable(ctx context.Context, id int64, schedu
 		SetSchedulable(schedulable).
 		Save(ctx)
 	if err != nil {
-		return err
+		return translatePersistenceError(err, service.ErrAccountNotFound, nil)
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue schedulable change failed: account=%d err=%v", id, err)
@@ -3066,6 +3078,7 @@ func ollamaCloudUsageSnapshotClearRequested(extra map[string]any) bool {
 }
 
 func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates service.AccountBulkUpdate) (int64, error) {
+	defer wayviaReloadAfterCommit(ctx)
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -3311,7 +3324,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 
 	result, err := exec.ExecContext(ctx, query, args...)
 	if err != nil {
-		return 0, err
+		return 0, translatePersistenceError(err, service.ErrAccountNotFound, nil)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
@@ -4147,4 +4160,16 @@ func (r *accountRepository) ListShadowsByParent(ctx context.Context, parentID in
 		out = append(out, accountEntityToService(m))
 	}
 	return out, nil
+}
+
+func wayviaReloadSnapshot() {
+	if m := wayviaegress.Default(); m != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Reload(ctx)
+	}
+}
+
+func wayviaReloadAfterCommit(ctx context.Context) {
+	service.AfterAccountCommit(ctx, func(context.Context) { wayviaReloadSnapshot() })
 }

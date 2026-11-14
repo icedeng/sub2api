@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -78,7 +79,7 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 	prewarmPayload["generate"] = false
 	prewarmPayloadJSON := payloadAsJSONBytes(prewarmPayload)
 
-	if err := lease.WriteJSONWithContextTimeout(ctx, prewarmPayload, s.openAIWSWriteTimeout()); err != nil {
+	if err := lease.WriteJSONWithContextTimeout(wayviaegress.WithAccount(ctx, account.ID, "prewarm"), prewarmPayload, s.openAIWSWriteTimeout()); err != nil {
 		lease.MarkBroken()
 		logOpenAIWSModeInfo(
 			"prewarm_write_fail account_id=%d conn_id=%s cause=%s",

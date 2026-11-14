@@ -1,0 +1,22 @@
+{
+  "prefix": "2001:db8:1234:5678::/64",
+  "node_id": "wayvia-node-1",
+  "interface": "ens18",
+  "primary_ipv6": "2001:db8:1234:5678::10",
+  "reserved_ipv6": [
+    "2001:db8:1234:5678::1"
+  ],
+  "max_addresses": 1024,
+  "socket": "/run/wayvia-egress/agent.sock",
+  "state_dir": "/var/lib/wayvia-egress/app",
+  "agent_state_dir": "/var/lib/wayvia-egress/agent",
+  "key_file": "/etc/wayvia-egress/allocation.key",
+  "key_id": "allocation-v1",
+  "app_uid": 1000,
+  "app_gid": 1000,
+  "probe_urls": [
+    "https://api6.ipify.org",
+    "https://ipv6.icanhazip.com",
+    "https://v6.ident.me"
+  ]
+}

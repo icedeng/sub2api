@@ -326,6 +326,7 @@
               @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
             />
           </template>
+          <template #cell-wayvia_egress="{ row }"><WayviaAccountCell :account="row" /></template>
           <template #cell-proxy="{ row }">
             <div class="flex flex-col gap-1">
               <div v-if="row.proxy" class="flex items-center gap-2">
@@ -503,6 +504,7 @@ import { useTableSelection } from '@/composables/useTableSelection'
 import { useStepUp, isStepUpBlocked, isStepUpCancelled, stepUpBlockReason } from '@/composables/useStepUp'
 import TotpStepUpDialog from '@/components/auth/TotpStepUpDialog.vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
+import WayviaAccountCell from '@/components/admin/WayviaAccountCell.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
@@ -1838,6 +1840,7 @@ const allColumns = computed(() => {
   c.push({ key: 'usage', label: t('admin.accounts.columns.usageWindows'), sortable: false })
   c.push(
     { key: 'proxy', label: t('admin.accounts.columns.proxy'), sortable: false },
+    { key: 'wayvia_egress', label: '出口', sortable: false },
     { key: 'priority', label: t('admin.accounts.columns.priority'), sortable: true },
     { key: 'scheduler_score', label: t('admin.accounts.columns.schedulerScore'), sortable: false },
     { key: 'rate_multiplier', label: t('admin.accounts.columns.billingRateMultiplier'), sortable: true },
@@ -1898,7 +1901,7 @@ const handleBulkDelete = async () => {
   const accountIds = [...selIds.value]
   if (!confirm(t('admin.accounts.bulkActions.confirmDelete', { count: accountIds.length }))) return
   try {
-    const result = await adminAPI.accounts.batchDelete(accountIds)
+    const result = await accountExportStepUp.run(() => adminAPI.accounts.batchDelete(accountIds))
     if (result.failed > 0) {
       appStore.showError(t('admin.accounts.bulkActions.partialSuccess', {
         success: result.success,
@@ -2490,7 +2493,16 @@ const confirmCreateSparkShadow = async () => {
   }
 }
 const handleDelete = (a: Account) => { deletingAcc.value = a; showDeleteDialog.value = true }
-const confirmDelete = async () => { if(!deletingAcc.value) return; try { await adminAPI.accounts.delete(deletingAcc.value.id); showDeleteDialog.value = false; deletingAcc.value = null; reload() } catch (error) { console.error('Failed to delete account:', error) } }
+const confirmDelete = async () => {
+  if (!deletingAcc.value) return
+  const id = deletingAcc.value.id
+  try {
+    await accountExportStepUp.run(() => adminAPI.accounts.delete(id))
+    showDeleteDialog.value = false; deletingAcc.value = null; reload()
+  } catch (error: any) {
+    if (!isStepUpCancelled(error)) appStore.showError(error?.message || '删除失败；出口退役任务可能仍在执行，请查看出口管理页')
+  }
+}
 const handleToggleSchedulable = async (a: Account) => {
   const nextSchedulable = !a.schedulable
   togglingSchedulable.value = a.id

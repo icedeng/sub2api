@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/setup"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"github.com/Wei-Shaw/sub2api/internal/web"
 
 	"github.com/gin-gonic/gin"
@@ -59,7 +61,12 @@ func main() {
 	// Parse command line flags
 	setupMode := flag.Bool("setup", false, "Run setup wizard in CLI mode")
 	showVersion := flag.Bool("version", false, "Show version information")
+	showWayvia := flag.Bool("wayvia-capabilities", false, "Print extension capability without starting services")
 	flag.Parse()
+	if *showWayvia {
+		fmt.Println(wayviaegress.Capability)
+		return
+	}
 
 	if *showVersion {
 		log.Printf("Sub2API %s (commit: %s, built: %s)\n", Version, Commit, Date)

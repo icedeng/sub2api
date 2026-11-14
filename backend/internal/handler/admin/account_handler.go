@@ -1429,6 +1429,20 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 			return nil, "", err
 		}
 
+		if tokenInfo.WayviaPersisted {
+			readCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			fresh, err := h.adminService.GetAccount(readCtx, account.ID)
+			if err != nil {
+				return nil, "", err
+			}
+			if h.tokenCacheInvalidator != nil {
+				if err = h.tokenCacheInvalidator.InvalidateToken(readCtx, fresh); err != nil {
+					log.Printf("[WARN] token cache invalidation failed for account %d", account.ID)
+				}
+			}
+			return fresh, "", nil
+		}
 		newCredentials = h.openaiOAuthService.BuildAccountCredentials(tokenInfo)
 		for k, v := range account.Credentials {
 			if _, exists := newCredentials[k]; !exists {

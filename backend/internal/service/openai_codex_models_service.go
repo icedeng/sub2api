@@ -22,6 +22,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"golang.org/x/net/http2"
 	"golang.org/x/sync/singleflight"
 )
@@ -1956,7 +1957,12 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 			resp, handled, err = s.pluginManager.RoundTripOpenAIOAuth(reqCtx, req, request.proxyURL, request.credentialAccount)
 		}
 		if !handled {
+			route, routeErr := wayviaegress.Resolve(request.accountID, "query")
+			if routeErr != nil {
+				return nil, routeErr
+			}
 			client, clientErr := httpclient.GetClient(httpclient.Options{
+				Route:                 &route,
 				ProxyURL:              request.proxyURL,
 				Timeout:               codexModelsManifestRequestTimeout,
 				ResponseHeaderTimeout: 10 * time.Second,
