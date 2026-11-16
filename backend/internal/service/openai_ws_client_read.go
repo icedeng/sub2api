@@ -45,6 +45,7 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 	timeoutReason string,
 	timeoutStart <-chan struct{},
 	timeoutActive func() bool,
+	pending ...<-chan openAIWSClientReadResult,
 ) (coderws.MessageType, []byte, error) {
 	if conn == nil {
 		return 0, nil, errors.New("openai websocket client connection is nil")
@@ -53,11 +54,13 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 		controlCtx = context.Background()
 	}
 
-	readDone := make(chan openAIWSClientReadResult, 1)
-	go func() {
-		messageType, payload, err := conn.Read(context.Background())
-		readDone <- openAIWSClientReadResult{messageType: messageType, payload: payload, err: err}
-	}()
+	var readDone <-chan openAIWSClientReadResult
+	if len(pending) > 0 {
+		readDone = pending[0]
+	}
+	if readDone == nil {
+		readDone = startOpenAIWSClientRead(conn)
+	}
 
 	var timer *time.Timer
 	var timeoutCh <-chan time.Time

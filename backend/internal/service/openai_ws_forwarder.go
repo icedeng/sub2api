@@ -263,6 +263,8 @@ type OpenAIWSIngressHooks struct {
 	TurnStarted             func(turn int, startedAt time.Time)
 	BeforeTurn              func(turn int) error
 	BeforeRequest           func(turn int, payload []byte, originalModel string) error
+	// NormalizeClientInput 复用 HTTP 入口对桌面注入上下文的窄范围兼容规则。
+	NormalizeClientInput func(payload []byte) []byte
 	// MapRequestModel resolves the current turn's client model to the model
 	// that must be written into the upstream response.create frame.
 	MapRequestModel func(turn int, originalModel string) (string, error)

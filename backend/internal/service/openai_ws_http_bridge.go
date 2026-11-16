@@ -96,6 +96,19 @@ func (s *OpenAIGatewayService) openAIWSHTTPBridgeEnabled() bool {
 	return s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.HTTPBridgeEnabled
 }
 
+func (s *OpenAIGatewayService) openAIWSRequiresHTTPBridge(account *Account) bool {
+	return account != nil && (account.Platform == PlatformGrok ||
+		(s != nil && s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account)))
+}
+
+// IsOpenAIWSHTTPBridgeAccount 让入口保留桥接账号的响应锚点，交给连接历史校验。
+// 按报文大小临时桥接的原生 WS 账号仍遵循原有路由规则。
+func (s *OpenAIGatewayService) IsOpenAIWSHTTPBridgeAccount(account *Account) bool {
+	return s.openAIWSRequiresHTTPBridge(account) ||
+		(s != nil && s.cfg != nil && account != nil && s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled &&
+			account.ResolveOpenAIResponsesWebSocketV2Mode(s.cfg.Gateway.OpenAIWS.IngressModeDefault) == OpenAIWSIngressModeHTTPBridge)
+}
+
 func (s *OpenAIGatewayService) openAIWSHTTPBridgeThresholdBytes() int64 {
 	if s == nil || s.cfg == nil || s.cfg.Gateway.OpenAIWS.HTTPBridgeThresholdBytes <= 0 {
 		return openAIWSHTTPBridgeThresholdBytesDefault
@@ -520,9 +533,13 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 	}
 
+	upstreamParent, releaseUpstreamCtx := detachUpstreamContext(ctx)
+	defer releaseUpstreamCtx()
+	// 显式 response.interrupt 必须取消实际请求；普通 socket 断线不取消本轮。
+	upstreamCtx, releaseAttempt := context.WithCancel(upstreamParent)
+	stopInterrupt := context.AfterFunc(ctx, releaseAttempt)
+	defer func() { stopInterrupt(); releaseAttempt() }()
 	buildUpstreamRequest := func(requestBody []byte) (*http.Request, error) {
-		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
-		defer releaseUpstreamCtx()
 		var upstreamReq *http.Request
 		var buildErr error
 		if account.Platform == PlatformGrok {
@@ -581,6 +598,12 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			return nil, buildErr
 		}
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		if ctx.Err() != nil {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			return nil, ctx.Err()
+		}
 		if err != nil {
 			if turn == 1 {
 				return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
@@ -705,7 +728,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			Duration:                      time.Since(turnStart),
 			FirstTokenMs:                  firstTokenMs,
 		}
-		if replayInput := replayCollector.Items(); len(replayInput) > 0 {
+		if replayInput := replayCollector.AllItems(); len(replayInput) > 0 {
 			result.wsReplayInput = replayInput
 			result.wsReplayInputExists = true
 		}
@@ -766,6 +789,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		return nil
 	}
 	for scanner.Scan() {
+		if ctx.Err() != nil {
+			break
+		}
 		line := scanner.Text()
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
 			pendingSSEEventType = eventType
@@ -1004,6 +1030,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			)
 			return resultWithUsage(), nil
 		}
+	}
+	if ctx.Err() != nil {
+		return resultWithUsage(), ctx.Err()
 	}
 	if bareErrorPending {
 		if finalizeErr := finalizeBareError(); finalizeErr != nil {

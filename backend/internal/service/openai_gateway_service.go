@@ -279,7 +279,9 @@ type OpenAIForwardResult struct {
 	Duration              time.Duration
 	FirstTokenMs          *int
 	ClientDisconnect      bool
-	ImageCount            int
+	// ClientInterrupted 表示客户端主动终止桥接轮次，不作为上游调度失败反馈。
+	ClientInterrupted bool
+	ImageCount        int
 	// ImageEndpoint 标记请求来自专用图片端点；分组 image_count_billing 开关
 	// 只对这类请求生效，混合 Responses/Chat/WS 请求仍按 token 计费。
 	ImageEndpoint      bool

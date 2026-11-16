@@ -30,6 +30,7 @@ type openAIWSClientFrameConn struct {
 	// model identifier they supplied for the current turn.
 	restoreResponseModel func([]byte) []byte
 	restoreToolNames     func([]byte) []byte
+	reader               *openAIWSClientReader
 }
 
 // openAIWSPolicyEnforcingFrameConn wraps a client-side FrameConn and runs
@@ -605,6 +606,10 @@ func (c *openAIWSClientFrameConn) ReadFrame(ctx context.Context) (coderws.Messag
 	if c.controlCtx != nil {
 		controlCtx = c.controlCtx
 	}
+	var pending <-chan openAIWSClientReadResult
+	if c.reader != nil {
+		pending = c.reader.start(c.conn)
+	}
 	msgType, payload, err := readOpenAIWSClientMessageWithTimeoutStart(
 		controlCtx,
 		c.conn,
@@ -613,7 +618,11 @@ func (c *openAIWSClientFrameConn) ReadFrame(ctx context.Context) (coderws.Messag
 		"websocket idle timeout",
 		c.interTurnStarted,
 		func() bool { return c.waitingForNextTurn.Load() },
+		pending,
 	)
+	if c.reader != nil {
+		c.reader.pending = nil
+	}
 	return msgType, payload, err
 }
 
@@ -956,6 +965,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	var acceptedTurnStartedAt atomic.Pointer[time.Time]
 	clientFrameConn := &openAIWSClientFrameConn{
 		conn:                 clientConn,
+		reader:               openAIWSClientReaderFromContext(c),
 		controlCtx:           ctx,
 		interTurnIdleTimeout: s.openAIWSIngressInterTurnIdleTimeout(),
 		interTurnStarted:     make(chan struct{}, 1),
@@ -999,6 +1009,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			}
 			responsesLite := isResponseCreate && isOpenAIResponsesLiteWebSocketPayload(payload)
 			if isResponseCreate {
+				if hooks != nil && hooks.NormalizeClientInput != nil {
+					payload = hooks.NormalizeClientInput(payload)
+				}
 				if normalized, compatibilityChanged, normalizeErr := normalizeOpenAIResponsesWebSocketCompatibilityBodyWithConfig(s.cfg, payload, account, responsesLite); normalizeErr != nil {
 					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", normalizeErr)
 				} else if compatibilityChanged {
