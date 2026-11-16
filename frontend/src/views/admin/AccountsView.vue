@@ -327,6 +327,17 @@
             />
           </template>
           <template #cell-wayvia_egress="{ row }"><WayviaAccountCell :account="row" /></template>
+          <!-- Wayvia 余额扩展：独立读取缓存，不改变核心账号 DTO。 -->
+          <template #cell-upstream_balance="{ row }">
+            <UpstreamBalanceCell
+              :account="row"
+              :state="upstreamBalanceStates[row.id]"
+              :loading="upstreamBalanceLoading"
+              :error="upstreamBalanceError"
+              :now="upstreamBalanceNow"
+              @updated="patchUpstreamBalance"
+            />
+          </template>
           <template #cell-proxy="{ row }">
             <div class="flex flex-col gap-1">
               <div v-if="row.proxy" class="flex items-center gap-2">
@@ -456,7 +467,7 @@
       <template #pagination><Pagination v-if="pagination.total > 0" :page="pagination.page" :total="pagination.total" :page-size="pagination.page_size" @update:page="handlePageChange" @update:pageSize="handlePageSizeChange" /></template>
     </TablePageLayout>
     <CreateAccountModal :show="showCreate" :proxies="proxies" :groups="groups" @close="showCreate = false" @created="reload" />
-    <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" />
+    <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" @balance-updated="patchUpstreamBalance" />
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
@@ -499,6 +510,7 @@ import { useAuthStore } from '@/stores/auth'
 import { adminAPI } from '@/api/admin'
 import { CONCRETE_PLATFORM_OPTIONS } from '@/constants/platforms'
 import { useTableLoader } from '@/composables/useTableLoader'
+import { useUpstreamBalanceCache } from '@/composables/useUpstreamBalanceCache'
 import { useSwipeSelect, type SwipeSelectVirtualContext } from '@/composables/useSwipeSelect'
 import { useTableSelection } from '@/composables/useTableSelection'
 import { useStepUp, isStepUpBlocked, isStepUpCancelled, stepUpBlockReason } from '@/composables/useStepUp'
@@ -527,6 +539,7 @@ import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vu
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
 import UpstreamBillingRateCell from '@/components/account/UpstreamBillingRateCell.vue'
+import UpstreamBalanceCell from '@/components/account/UpstreamBalanceCell.vue'
 import AccountPriorityCell from '@/components/account/AccountPriorityCell.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -1123,6 +1136,15 @@ const {
     sort_order: sortState.sort_order
   }
 })
+
+// Wayvia 余额扩展：按当前页批量读取缓存，隐藏列时停止读取。
+const {
+  states: upstreamBalanceStates,
+  loading: upstreamBalanceLoading,
+  error: upstreamBalanceError,
+  now: upstreamBalanceNow,
+  patch: patchUpstreamBalance
+} = useUpstreamBalanceCache(accounts, computed(() => authStore.isAdmin && isColumnVisible('upstream_balance')))
 
 const {
   selectedSet,
@@ -1838,6 +1860,9 @@ const allColumns = computed(() => {
     c.push({ key: 'groups', label: t('admin.accounts.columns.groups'), sortable: false })
   }
   c.push({ key: 'usage', label: t('admin.accounts.columns.usageWindows'), sortable: false })
+  if (authStore.isAdmin) {
+    c.push({ key: 'upstream_balance', label: t('admin.accounts.upstreamBalance.column'), sortable: false })
+  }
   c.push(
     { key: 'proxy', label: t('admin.accounts.columns.proxy'), sortable: false },
     { key: 'wayvia_egress', label: '出口', sortable: false },

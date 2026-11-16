@@ -1,0 +1,229 @@
+openapi: 3.0.3
+info:
+  title: Wayvia Upstream Balance Extension
+  version: 1.0.0
+  description: >-
+    独立余额查询模块。GET只读本地状态；只有显式刷新及定时任务访问上游。
+    仅完整管理员可用，受限管理密钥禁止；管理认证、限流、合规、审计复用宿主。
+    写操作遵循宿主step_up_enabled，开启时需要现有会话TOTP step-up授权。
+    200只表示返回本地状态，查询可能失败、部分成功、冷却或正在进行，应检查data.status及error_code。
+    金额和原始额度为十进制字符串，缺失、真实零、不限额有独立表达。所有模块响应禁止缓存。
+servers:
+  - url: /api/v1/admin/wayvia-balance
+security:
+  - AdminJWT: []
+  - FullAdminKey: []
+paths:
+  /accounts:
+    get:
+      summary: 批量读取已存在账号的本地余额状态
+      parameters:
+        - name: ids
+          in: query
+          required: true
+          description: 逗号分隔1至100个正整数账号ID；重复ID去重，不存在的账号不返回
+          schema: {type: string, example: '1,2'}
+      responses:
+        '200':
+          description: 缓存状态列表，不访问上游
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/Envelope'}
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items: {$ref: '#/components/schemas/State'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '423': {$ref: '#/components/responses/ComplianceRequired'}
+        '429': {$ref: '#/components/responses/PanelRateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /accounts/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/AccountID'}
+    get:
+      summary: 读取配置及本地快照；不返回补充令牌明文或密文
+      responses:
+        '200': {$ref: '#/components/responses/State'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 账号不存在}
+        '423': {$ref: '#/components/responses/ComplianceRequired'}
+        '429': {$ref: '#/components/responses/PanelRateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    put:
+      summary: 单独保存余额配置，复核账号身份及配置版本
+      description: >-
+        不更新账号本身；不在保存时查询上游。补充令牌只供New API或auto使用，必须配置query_user_id，
+        且服务端已有持久加密密钥。省略query_token保留已有值，空字符串不是保留操作。
+        clear_query_token与query_token不能同时提供。更改身份、协议、用户编号或令牌会清除旧查询快照/识别状态。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_revision, config]
+              properties:
+                expected_revision: {type: integer, format: int64, minimum: 0, description: 首次配置为0；已有配置使用GET返回值}
+                config: {$ref: '#/components/schemas/Config'}
+                query_token: {type: string, minLength: 1, maxLength: 8192, writeOnly: true}
+                clear_query_token: {type: boolean, default: false}
+      responses:
+        '200': {$ref: '#/components/responses/State'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 账号不存在}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '423': {$ref: '#/components/responses/ComplianceRequired'}
+        '429': {$ref: '#/components/responses/PanelRateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /accounts/{id}/refresh:
+    parameters:
+      - {$ref: '#/components/parameters/AccountID'}
+    post:
+      summary: 受限刷新并返回状态，不绕过站点冷却和账号锁
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rediscover: {type: boolean, default: false, description: auto类型忽略已有识别路径，仍遵守冷却}
+      responses:
+        '200': {$ref: '#/components/responses/State'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 账号不存在}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '423': {$ref: '#/components/responses/ComplianceRequired'}
+        '429': {$ref: '#/components/responses/PanelRateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+components:
+  securitySchemes:
+    AdminJWT: {type: http, scheme: bearer, bearerFormat: JWT}
+    FullAdminKey: {type: apiKey, in: header, name: x-api-key, description: 仅全权密钥；step-up开启时写请求不允许机器凭证}
+  parameters:
+    AccountID:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+  responses:
+    State:
+      description: data为本地状态；失败可保留旧快照，不能仅以HTTP 200判断上游查询成功
+      headers:
+        Cache-Control: {schema: {type: string, enum: [no-store]}}
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: '#/components/schemas/Envelope'}
+              - type: object
+                properties:
+                  data: {$ref: '#/components/schemas/State'}
+    BadRequest: {description: 无效账号类型、ID、配置或请求体}
+    Unauthorized: {description: 未通过管理员认证}
+    Forbidden: {description: 受限管理密钥，或宿主step-up认证未通过/不可用}
+    ComplianceRequired: {description: 管理员尚未确认宿主合规声明}
+    PanelRateLimited: {description: 宿主管理面板限流；与上游限流状态不同}
+    Conflict: {description: reason为CONFIG_CHANGED；账号身份、配置版本或上次尝试已改变，需重新加载}
+    Unavailable: {description: reason为BALANCE_UNAVAILABLE；模块、持久化、加密或其他依赖暂不可用}
+  schemas:
+    Envelope:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: integer, description: 成功为0，错误为HTTP状态码}
+        message: {type: string}
+        reason: {type: string}
+    Config:
+      type: object
+      required: [enabled, provider, auto_refresh, interval_minutes]
+      properties:
+        enabled: {type: boolean, default: false}
+        provider: {type: string, enum: [sub2api, newapi, auto], default: sub2api}
+        auto_refresh: {type: boolean, default: true}
+        interval_minutes: {type: integer, minimum: 5, maximum: 1440, default: 5}
+        low_balance_threshold: {type: string, maxLength: 40, description: 可选非负十进制字符串；按钱包单位，仅用于页面提示}
+        query_user_id: {type: string, description: 可选的正整数int64十进制字符串；补充令牌用户ID，不能证明与模型Key同用户}
+    Metric:
+      type: object
+      description: 缺失Metric表示未提供；amount为字符串0表示真实零；unlimited为true表示不限额
+      properties:
+        amount: {type: string, example: '82.73'}
+        unit: {type: string, example: USD, description: 未知换算依据时New API为quota，不猜测币种}
+        raw_amount: {type: string, example: '41365000'}
+        unlimited: {type: boolean}
+    Period:
+      type: object
+      required: [window]
+      properties:
+        window: {type: string, example: 5h}
+        remaining: {$ref: '#/components/schemas/Metric'}
+        used: {$ref: '#/components/schemas/Metric'}
+        limit: {$ref: '#/components/schemas/Metric'}
+        resets_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+    Metadata:
+      type: object
+      required: [quota_per_unit, display_type, fetched_at, expires_at]
+      properties:
+        quota_per_unit: {type: string}
+        display_type: {type: string, enum: [USD, CNY, CUSTOM, QUOTA]}
+        currency_symbol: {type: string}
+        exchange_rate: {type: string}
+        fetched_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+    Snapshot:
+      type: object
+      required: [provider, path, periods, received_at, fresh_until]
+      properties:
+        provider: {type: string, enum: [sub2api, newapi]}
+        path: {type: string, description: 适配器接口路径；请求时在前面保留账号反向代理子路径}
+        wallet_path: {type: string, description: 如有账户级补充钱包，记录其独立来源路径}
+        wallet: {$ref: '#/components/schemas/Metric'}
+        key_quota: {$ref: '#/components/schemas/Metric'}
+        periods:
+          type: array
+          items: {$ref: '#/components/schemas/Period'}
+        today:
+          type: object
+          required: [scope]
+          properties:
+            requests: {type: string}
+            tokens: {type: string}
+            cost: {$ref: '#/components/schemas/Metric'}
+            scope: {type: string, enum: [key]}
+        received_at: {type: string, format: date-time}
+        fresh_until: {type: string, format: date-time}
+        wallet_unavailable_reason: {type: string, description: 脱敏类别，不是上游原始错误}
+        metadata: {$ref: '#/components/schemas/Metadata'}
+    State:
+      type: object
+      required: [account_id, eligible, revision, config, query_token_configured, status]
+      properties:
+        account_id: {type: integer, format: int64}
+        eligible: {type: boolean, description: 仅API Key账号适用}
+        revision: {type: integer, format: int64, minimum: 0}
+        config: {$ref: '#/components/schemas/Config'}
+        query_token_configured: {type: boolean}
+        status:
+          type: string
+          enum: [disabled, never, ok, partial, stale, refreshing, cooldown, error, config_changed, unavailable]
+        error_code: {type: string, description: 本地脱敏类别，如rate_limited、metadata_unavailable、query_busy；未知类别按通用错误显示}
+        last_attempt_at: {type: string, format: date-time}
+        next_retry_at: {type: string, format: date-time, description: 冷却或正常自动刷新到期时间；不能仅凭未来时间禁用所有手动刷新}
+        snapshot: {$ref: '#/components/schemas/Snapshot'}

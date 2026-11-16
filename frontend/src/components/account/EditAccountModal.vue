@@ -2275,6 +2275,14 @@
         />
       </div>
 
+      <!-- Wayvia 余额扩展单独保存，不混入账号整体更新载荷。 -->
+      <UpstreamBalanceSettings
+        v-if="show && account?.type === 'apikey'"
+        :key="account.id"
+        :account="account"
+        @updated="emit('balanceUpdated', $event)"
+      />
+
       <OllamaCloudUsageSettings
         v-if="account?.ollama_cloud_usage?.eligible"
         :account="account"
@@ -3446,6 +3454,8 @@ import {
 import OpenCodeGoProtocolRulesEditor from '@/components/account/OpenCodeGoProtocolRulesEditor.vue'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
 import OllamaCloudUsageSettings from '@/components/account/OllamaCloudUsageSettings.vue'
+import UpstreamBalanceSettings from '@/components/account/UpstreamBalanceSettings.vue'
+import type { UpstreamBalanceState } from '@/api/admin/wayvia-balance'
 import {
   applyAntigravityProjectID,
   applyHeaderOverride,
@@ -3524,6 +3534,7 @@ const props = defineProps<Props>()
 const emit = defineEmits<{
   close: []
   updated: [account: Account]
+  balanceUpdated: [state: UpstreamBalanceState]
 }>()
 
 const { t } = useI18n()

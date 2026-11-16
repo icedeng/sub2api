@@ -1,5 +1,8 @@
+import upstreamBalance from './upstreamBalance'
+
 export default {
     accounts: {
+      upstreamBalance,
       title: 'Account Management',
       description: 'Manage AI platform accounts and credentials',
       createAccount: 'Create Account',

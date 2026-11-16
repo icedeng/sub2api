@@ -136,6 +136,8 @@ vite.config.js
 docs/*
 !docs/wayvia-egress/
 !docs/wayvia-egress/**
+!docs/wayvia-balance/
+!docs/wayvia-balance/**
 !docs/agent-resource-safety.md
 !docs/moego-json-batching.md
 !docs/admin-api-keys.md

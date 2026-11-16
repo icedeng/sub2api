@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/server"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/wayviabalance"
 	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 
 	"github.com/google/wire"
@@ -47,6 +48,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 
 		// Server layer ProviderSet
 		server.ProviderSet,
+		wayviabalance.Provide,
 
 		// Privacy client factory for OpenAI training opt-out
 		providePrivacyClientFactory,
@@ -84,6 +86,7 @@ func providePluginHostInfo(buildInfo handler.BuildInfo) service.PluginHostInfo {
 }
 
 func provideCleanup(
+	upstreamBalance *wayviabalance.Manager,
 	entClient *ent.Client,
 	rdb *redis.Client,
 	opsMetricsCollector *service.OpsMetricsCollector,
@@ -459,6 +462,8 @@ func provideCleanup(
 				log.Printf("[Cleanup] %s succeeded", step.name)
 			}
 		}
+
+		upstreamBalance.Close()
 
 		if m := wayviaegress.Default(); m != nil {
 			m.Close()
