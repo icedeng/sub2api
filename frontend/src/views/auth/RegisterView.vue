@@ -556,6 +556,20 @@ function syncAffiliateReferralCode(): string {
   return code
 }
 
+function syncRegistrationInvitationCode(): void {
+  if (!invitationCodeEnabled.value) return
+
+  // 注册邀请码与优惠码、返利码独立，仅预填，仍需通过现有校验。
+  const value = route.query.invite ?? route.query.invitation_code
+  if (typeof value !== 'string') return
+
+  const code = value.trim()
+  if (!code || code === formData.invitation_code) return
+
+  formData.invitation_code = code
+  handleInvitationCodeInput()
+}
+
 // ==================== Lifecycle ====================
 
 onMounted(async () => {
@@ -614,6 +628,11 @@ watch(
   () => {
     syncAffiliateReferralCode()
   }
+)
+
+watch(
+  () => [invitationCodeEnabled.value, route.query.invite, route.query.invitation_code],
+  syncRegistrationInvitationCode
 )
 
 onUnmounted(() => {
