@@ -54,9 +54,10 @@ func translatePersistenceError(err error, notFound, conflict *infraerrors.Applic
 	var pgErr *pq.Error
 	if errors.As(err, &pgErr) && pgErr.Code == "P0001" {
 		messages := map[string]string{
-			"EGRESS_ENROLLMENT_REQUIRED": "账号已暂停，请先在固定 IPv6 出口页面完成启用与核验，再开放调度",
-			"EGRESS_FIXED_IPV6_REQUIRED": "此账号必须使用固定 IPv6，不能通过修改账号类型、母账号或出口策略绕过",
-			"EGRESS_PARENT_NOT_READY":    "请先为母账号启用固定 IPv6，核验通过后再创建影子账号",
+			"EGRESS_CONTROLLED_CREDENTIAL_WRITE_REQUIRED": "固定 IPv6 账号的认证凭据不能通过普通编辑修改；如凭据已自动刷新，请重新打开编辑窗口，重新授权请使用固定 IPv6 出口页面",
+			"EGRESS_ENROLLMENT_REQUIRED":                  "账号已暂停，请先在固定 IPv6 出口页面完成启用与核验，再开放调度",
+			"EGRESS_FIXED_IPV6_REQUIRED":                  "此账号必须使用固定 IPv6，不能通过修改账号类型、母账号或出口策略绕过",
+			"EGRESS_PARENT_NOT_READY":                     "请先为母账号启用固定 IPv6，核验通过后再创建影子账号",
 		}
 		if message, ok := messages[pgErr.Message]; ok {
 			return infraerrors.New(409, pgErr.Message, message).WithCause(err)
