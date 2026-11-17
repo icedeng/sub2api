@@ -11,10 +11,10 @@ import (
 
 var codexSelectedPageName = regexp.MustCompile(`^codex_apps_selected_page_part_([1-9][0-9]*)_of_([1-9][0-9]*)$`)
 
-// Desktop 将浏览器环境和页面快照注入为没有对应工具调用的输出。
+// Codex 将浏览器环境、页面快照及其他外部上下文注入为没有对应工具调用的输出。
 // 首次请求、历史重放和混合启动上下文均保留为不可信用户文本。
-func normalizeCodexPageContext(body []byte) ([]byte, bool) {
-	if !mayContainCodexCallOutputCandidate(body, "browser_tabs", "codex_apps_open_page", "codex_apps_selected_page_part_") || !hasUniqueJSONMembers(body) {
+func normalizeCodexUntrustedContext(body []byte) ([]byte, bool) {
+	if !mayContainCodexCallOutputCandidate(body, "browser_tabs", "codex_apps_open_page", "codex_apps_selected_page_part_", "browser_info", "goal_objective", "untrusted_context") || !hasUniqueJSONMembers(body) {
 		return body, false
 	}
 	var request map[string]json.RawMessage
@@ -46,15 +46,19 @@ func normalizeCodexPageContext(body []byte) ([]byte, bool) {
 			}
 		}
 		name, output := readString("name"), readString("output")
-		if !validCodexPageContext(name, output) {
+		if !validCodexUntrustedContext(name, output) {
 			continue
+		}
+		text := "<external_" + name + ">" + output + "</external_" + name + ">"
+		if validCodexPageContext(name, output) {
+			text = "<external_" + name + ">\n" + output + "\n</external_" + name + ">"
 		}
 		message := map[string]any{
 			"type": "message",
 			"role": "user",
 			"content": []map[string]string{{
 				"type": "input_text",
-				"text": "<external_" + name + ">\n" + output + "\n</external_" + name + ">",
+				"text": text,
 			}},
 		}
 		encoded, err := json.Marshal(message)
@@ -77,6 +81,15 @@ func normalizeCodexPageContext(body []byte) ([]byte, bool) {
 		return body, false
 	}
 	return encoded, true
+}
+
+func validCodexUntrustedContext(name, output string) bool {
+	switch name {
+	case "browser_info", "goal_objective", "untrusted_context":
+		return strings.TrimSpace(output) != ""
+	default:
+		return validCodexPageContext(name, output)
+	}
 }
 
 func validCodexPageContext(name, output string) bool {
