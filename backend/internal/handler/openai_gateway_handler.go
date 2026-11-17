@@ -509,7 +509,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		)
 	}
 	if normalizedBody, changed, normalizeErr := service.NormalizeOpenAIToolOutputCallIDs(body); normalizeErr != nil {
-		reqLog.Warn("openai.request_validation_failed", zap.String("reason", "tool_call_context_missing"), zap.Error(normalizeErr))
+		reqLog.Warn("openai.request_validation_failed", append(openAIToolContextLogFields(body), zap.String("reason", "tool_call_context_missing"), zap.Error(normalizeErr))...)
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", normalizeErr.Error())
 		return
 	} else if changed {
@@ -1714,9 +1714,7 @@ func (h *OpenAIGatewayHandler) validateFunctionCallOutputRequest(c *gin.Context,
 	}
 
 	if validation.HasFunctionCallOutputMissingCallID {
-		reqLog.Warn("openai.request_validation_failed",
-			zap.String("reason", "function_call_output_missing_call_id"),
-		)
+		reqLog.Warn("openai.request_validation_failed", append(openAIToolContextLogFields(body), zap.String("reason", "function_call_output_missing_call_id"))...)
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "function_call_output requires call_id on HTTP requests; continuation via previous_response_id is only supported on Responses WebSocket v2")
 		return false
 	}

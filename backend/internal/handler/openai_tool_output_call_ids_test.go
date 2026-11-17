@@ -4,6 +4,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -68,6 +69,35 @@ func TestOpenAIResponses_NormalizesCodexAmbientBrowserContext(t *testing.T) {
 				require.Zero(t, outputs)
 			}
 		})
+	}
+}
+
+func TestOpenAIResponses_NormalizesAdditionalCodexContext(t *testing.T) {
+	for _, name := range []string{"browser_info", "goal_objective", "untrusted_context"} {
+		for _, withHistory := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/history=%v", name, withHistory), func(t *testing.T) {
+				items := []any{pageContextItem(name, "external context")}
+				if withHistory {
+					items = append(items,
+						map[string]any{"type": "function_call", "call_id": "call_real", "name": "run", "arguments": "{}"},
+						map[string]any{"type": "function_call_output", "call_id": "call_real", "output": "done"})
+				}
+				body, err := json.Marshal(map[string]any{"model": "gpt-5.1", "stream": false, "input": items})
+				require.NoError(t, err)
+				upstream := &toolOutputCallIDUpstream{}
+				h := newOpenAIResponsesFailoverTestHandler(t, upstream)
+				c, rec := newOpenAIResponsesFailoverTestContext(t, nil)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(body)))
+				c.Request.Header.Set("Content-Type", "application/json")
+				h.Responses(c)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				require.Len(t, upstream.bodies, 1)
+				item := gjson.GetBytes(upstream.bodies[0], "input.0")
+				require.Equal(t, "user", item.Get("role").String())
+				require.Equal(t, "<external_"+name+">external context</external_"+name+">", item.Get("content.0.text").String())
+				require.False(t, item.Get("call_id").Exists())
+			})
+		}
 	}
 }
 
