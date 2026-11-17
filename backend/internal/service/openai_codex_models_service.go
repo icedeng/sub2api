@@ -1860,12 +1860,30 @@ func (s *OpenAIGatewayService) handleCodexModelsManifestAccountAuthError(ctx con
 		return
 	}
 	var upstreamErr *codexModelsManifestUpstreamError
-	if !errors.As(err, &upstreamErr) || upstreamErr.statusCode != http.StatusUnauthorized {
+	if !errors.As(err, &upstreamErr) {
+		if s.health != nil {
+			if class, _ := healthClassifyError(err); class == "network" {
+				ctx = s.health.requestContext(ctx, account, credAccount, "models")
+				s.health.ObserveFailure(ctx, account, 0, nil, nil, "models", "")
+			}
+		}
+		return
+	}
+	if upstreamErr.statusCode != http.StatusUnauthorized {
+		if s.health != nil {
+			ctx = s.health.requestContext(ctx, account, credAccount, "models")
+			s.health.ObserveFailure(ctx, account, upstreamErr.statusCode, upstreamErr.headers, upstreamErr.body, "models", "")
+		}
 		return
 	}
 	headers := upstreamErr.headers
 	if headers == nil {
 		headers = http.Header{}
+	}
+	if s.health != nil {
+		ctx = s.health.requestContext(ctx, account, credAccount, "models")
+		s.health.HandleFailure(ctx, account, upstreamErr.statusCode, headers, upstreamErr.body, "models", "")
+		return
 	}
 	s.handleOpenAIAccountUpstreamError(ctx, account, upstreamErr.statusCode, headers, upstreamErr.body)
 }

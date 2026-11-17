@@ -40,6 +40,7 @@ func RegisterAdminRoutes(
 		registerAdminComplianceRoutes(admin, h)
 
 		registerWayviaEgressRoutes(admin, h)
+		registerWayviaHealthRoutes(admin, h)
 
 		// 仪表盘
 		registerDashboardRoutes(admin, h)

@@ -2522,6 +2522,7 @@ export interface TotpLogin2FARequest {
 // ==================== Scheduled Test Types ====================
 
 export interface ScheduledTestPlan {
+  test_content?: string | null
   id: number
   account_id: number
   model_id: string
@@ -2548,6 +2549,7 @@ export interface ScheduledTestResult {
 }
 
 export interface CreateScheduledTestPlanRequest {
+  test_content?: string | null
   account_id: number
   model_id: string
   cron_expression: string
@@ -2557,6 +2559,7 @@ export interface CreateScheduledTestPlanRequest {
 }
 
 export interface UpdateScheduledTestPlanRequest {
+  test_content?: string | null
   model_id?: string
   cron_expression?: string
   enabled?: boolean

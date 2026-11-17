@@ -508,6 +508,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.String("normalization", "call_output_to_user_message"),
 		)
 	}
+	if normalizedBody, changed, normalizeErr := service.NormalizeOpenAIToolOutputCallIDs(body); normalizeErr != nil {
+		reqLog.Warn("openai.request_validation_failed", zap.String("reason", "tool_call_context_missing"), zap.Error(normalizeErr))
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", normalizeErr.Error())
+		return
+	} else if changed {
+		body = normalizedBody
+		reqLog.Info("openai.tool_output_call_ids_normalized")
+	}
 
 	reqStream, ok := parseOpenAICompatibleStream(body)
 	if !ok {

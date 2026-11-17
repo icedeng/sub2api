@@ -19,7 +19,21 @@ import (
 )
 
 // Forward forwards request to OpenAI API
-func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (healthResult *OpenAIForwardResult, healthErr error) {
+	if s.health != nil {
+		protocol := healthProtocol(account)
+		if GetOpenAIClientTransport(c) == OpenAIClientTransportWS {
+			protocol = "websocket"
+		}
+		ctx = s.health.requestContext(ctx, account, nil, protocol)
+		defer func() {
+			if healthErr == nil {
+				s.health.observeForwardSuccess(ctx, c, account, healthResult)
+			} else if class, _ := healthClassifyError(healthErr); class == "network" {
+				s.health.ObserveFailure(ctx, account, 0, nil, nil, "gateway", gjson.GetBytes(body, "model").String())
+			}
+		}()
+	}
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/wayviahealth"
 	"github.com/tidwall/gjson"
 )
 
@@ -144,7 +145,10 @@ func (s *RateLimitService) IsOpenAIAdvancedSchedulerStickyWeightedEnabled(ctx co
 	return gateway.isOpenAIAdvancedSchedulerStickyWeightedEnabled(ctx)
 }
 
-func (s *RateLimitService) notifyAccountSchedulingBlocked(account *Account, until time.Time, reason string) {
+func (s *RateLimitService) notifyAccountSchedulingBlocked(account *Account, until time.Time, reason string, contexts ...context.Context) {
+	if len(contexts) > 0 && wayviahealth.CredentialGuards(contexts[0]) != nil {
+		return
+	}
 	if s == nil || s.runtimeBlocker == nil || account == nil {
 		return
 	}
@@ -197,7 +201,7 @@ func (s *RateLimitService) ApplyAccountSchedulingThreshold(ctx context.Context, 
 
 	account.TempUnschedulableUntil = cloneTimePtr(decision.Until)
 	account.TempUnschedulableReason = reason
-	s.notifyAccountSchedulingBlocked(account, *decision.Until, "account_scheduling_threshold")
+	s.notifyAccountSchedulingBlocked(account, *decision.Until, "account_scheduling_threshold", ctx)
 
 	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, *decision.Until, reason); err != nil {
 		slog.Warn("account_scheduling_threshold_set_temp_unsched_failed",
@@ -526,7 +530,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 				cooldownMinutes = 10
 			}
 			until := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
-			s.notifyAccountSchedulingBlocked(authAccount, until, "oauth_401")
+			s.notifyAccountSchedulingBlocked(authAccount, until, "oauth_401", ctx)
 			if err := s.accountRepo.SetTempUnschedulable(ctx, authAccount.ID, until, msg); err != nil {
 				slog.Warn("oauth_401_set_temp_unschedulable_failed", "account_id", authAccount.ID, "error", err)
 			}
@@ -973,7 +977,7 @@ func (s *RateLimitService) GeminiCooldown(ctx context.Context, account *Account)
 
 // handleAuthError 处理认证类错误(401/403)，停止账号调度
 func (s *RateLimitService) handleAuthError(ctx context.Context, account *Account, errorMsg string) {
-	s.notifyAccountSchedulingBlocked(account, time.Time{}, "auth_error")
+	s.notifyAccountSchedulingBlocked(account, time.Time{}, "auth_error", ctx)
 	if err := s.accountRepo.SetError(ctx, account.ID, errorMsg); err != nil {
 		slog.Warn("account_set_error_failed", "account_id", account.ID, "error", err)
 		return
@@ -1081,6 +1085,15 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 		responseBody,
 		"account may be suspended or lack permissions",
 	)
+	// 健康检测不累加按账号 ID 存储、无法与凭据版本一起 CAS 的历史 strike。
+	// 明确认证撤销仍由 401 分支处理；普通结构化 403 只进入可到期的短期冷却。
+	if wayviahealth.CredentialGuards(ctx) != nil {
+		until := time.Now().Add(time.Duration(openAI403CooldownMinutesDefault) * time.Minute)
+		if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, msg); err != nil {
+			return false
+		}
+		return true
+	}
 
 	if s.openAI403CounterCache == nil {
 		s.handleAuthError(ctx, account, msg)
@@ -1102,7 +1115,7 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 
 	until := time.Now().Add(time.Duration(openAI403CooldownMinutesDefault) * time.Minute)
 	reason := fmt.Sprintf("OpenAI 403 temporary cooldown (%d/%d): %s", count, openAI403DisableThreshold, msg)
-	s.notifyAccountSchedulingBlocked(account, until, "openai_403_temp")
+	s.notifyAccountSchedulingBlocked(account, until, "openai_403_temp", ctx)
 	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); err != nil {
 		slog.Warn("openai_403_set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
 		s.handleAuthError(ctx, account, msg)
@@ -1229,7 +1242,7 @@ func (s *RateLimitService) handleAntigravity403(ctx context.Context, account *Ac
 // handleCustomErrorCode 处理自定义错误码，停止账号调度
 func (s *RateLimitService) handleCustomErrorCode(ctx context.Context, account *Account, statusCode int, errorMsg string) {
 	msg := "Custom error code " + strconv.Itoa(statusCode) + ": " + errorMsg
-	s.notifyAccountSchedulingBlocked(account, time.Time{}, "custom_error_code")
+	s.notifyAccountSchedulingBlocked(account, time.Time{}, "custom_error_code", ctx)
 	if err := s.accountRepo.SetError(ctx, account.ID, msg); err != nil {
 		slog.Warn("account_set_error_failed", "account_id", account.ID, "status_code", statusCode, "error", err)
 		return
@@ -1243,7 +1256,7 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	// OpenAI OAuth stays on the same account for the gateway's bounded retry
 	// window. Persisting a rate-limit reset on the first 429 would make the next
 	// retry ineligible and silently turn same-account recovery into a switch.
-	if account != nil && isOpenAIOAuthAccount(account) && s.runtimeBlocker != nil {
+	if account != nil && isOpenAIOAuthAccount(account) && s.runtimeBlocker != nil && wayviahealth.CredentialGuards(ctx) == nil {
 		if checker, ok := s.runtimeBlocker.(interface {
 			ShouldRetryOpenAIOAuth429(*Account, http.Header, []byte) bool
 		}); ok && checker.ShouldRetryOpenAIOAuth429(account, headers, responseBody) {
@@ -1257,7 +1270,9 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	// QueryUsage→persistOpenAICodexProbeSnapshot 维护,枯竭由调度守卫处理。
 	if account.IsShadow() {
 		if account.ParentAccountID != nil {
-			notifyOpenAIAutoReset(*account.ParentAccountID)
+			if wayviahealth.CredentialGuards(ctx) == nil {
+				notifyOpenAIAutoReset(*account.ParentAccountID)
+			}
 		}
 		return
 	}
@@ -1265,7 +1280,7 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	// ollama.com 的用量窗口驱动。其响应头不得被当作 OpenAI codex / Anthropic /
 	// CN 限流来解析，故在国产供应商分支之前单独处理：先设置永不缩短的临时冷却，
 	// 再调度异步 probe 学习真实重置点（详见 ratelimit_service_ollama_429.go）。
-	if account != nil && IsOllamaCloudUsageAccount(account) {
+	if account != nil && IsOllamaCloudUsageAccount(account) && wayviahealth.CredentialGuards(ctx) == nil {
 		s.handleOllamaCloudUsage429(ctx, account, headers)
 		return
 	}
@@ -1280,9 +1295,11 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	if account.Platform == PlatformOpenAI {
 		persistOpenAI429PlanType(ctx, s.accountRepo, account, responseBody)
 		s.persistOpenAICodexSnapshot(ctx, account, headers)
-		notifyOpenAIAutoReset(account.ID)
+		if wayviahealth.CredentialGuards(ctx) == nil {
+			notifyOpenAIAutoReset(account.ID)
+		}
 		if resetAt := s.calculateOpenAI429ResetTime(headers); resetAt != nil {
-			s.notifyAccountSchedulingBlocked(account, *resetAt, "429")
+			s.notifyAccountSchedulingBlocked(account, *resetAt, "429", ctx)
 			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
 				slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 				return
@@ -1294,7 +1311,7 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 
 	// 2. Anthropic 平台：尝试解析 per-window 头（5h / 7d），选择实际触发的窗口
 	if result := calculateAnthropic429ResetTime(headers); result != nil {
-		s.notifyAccountSchedulingBlocked(account, result.resetAt, "429")
+		s.notifyAccountSchedulingBlocked(account, result.resetAt, "429", ctx)
 		if err := s.accountRepo.SetRateLimited(ctx, account.ID, result.resetAt); err != nil {
 			slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 			return
@@ -1324,7 +1341,7 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 			// 尝试解析 OpenAI 的 usage_limit_reached 错误
 			if resetAt := parseOpenAIRateLimitResetTime(responseBody); resetAt != nil {
 				resetTime := time.Unix(*resetAt, 0)
-				s.notifyAccountSchedulingBlocked(account, resetTime, "429")
+				s.notifyAccountSchedulingBlocked(account, resetTime, "429", ctx)
 				if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetTime); err != nil {
 					slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 					return
@@ -1336,7 +1353,7 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 			// 尝试解析 Gemini 格式（用于其他平台）
 			if resetAt := ParseGeminiRateLimitResetTime(responseBody); resetAt != nil {
 				resetTime := time.Unix(*resetAt, 0)
-				s.notifyAccountSchedulingBlocked(account, resetTime, "429")
+				s.notifyAccountSchedulingBlocked(account, resetTime, "429", ctx)
 				if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetTime); err != nil {
 					slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 					return
@@ -1375,7 +1392,7 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	resetAt := time.Unix(ts, 0)
 
 	// 标记限流状态
-	s.notifyAccountSchedulingBlocked(account, resetAt, "429")
+	s.notifyAccountSchedulingBlocked(account, resetAt, "429", ctx)
 	if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetAt); err != nil {
 		slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 		return
@@ -1400,7 +1417,7 @@ func (s *RateLimitService) apply429FallbackRateLimit(ctx context.Context, accoun
 
 	resetAt := time.Now().Add(cooldown)
 	slog.Warn("rate_limit_429_fallback_used", "account_id", account.ID, "platform", account.Platform, "reason", reason, "using_default", cooldown.String())
-	s.notifyAccountSchedulingBlocked(account, resetAt, "429_fallback")
+	s.notifyAccountSchedulingBlocked(account, resetAt, "429_fallback", ctx)
 	if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetAt); err != nil {
 		slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 	}
@@ -1578,7 +1595,7 @@ func (s *RateLimitService) persistAnthropicExhaustedWindowLimit(ctx context.Cont
 		return true
 	}
 
-	s.notifyAccountSchedulingBlocked(account, limit.resetAt, limit.reason)
+	s.notifyAccountSchedulingBlocked(account, limit.resetAt, limit.reason, ctx)
 	if err := s.accountRepo.SetRateLimited(ctx, account.ID, limit.resetAt); err != nil {
 		slog.Warn("anthropic_window_rate_limit_set_failed",
 			"account_id", account.ID,
@@ -1834,7 +1851,9 @@ func (s *RateLimitService) persistOpenAICodexSnapshot(ctx context.Context, accou
 		slog.Warn("openai_codex_snapshot_persist_failed", "account_id", account.ID, "error", err)
 		return
 	}
-	notifyOpenAIAutoReset(account.ID)
+	if wayviahealth.CredentialGuards(ctx) == nil {
+		notifyOpenAIAutoReset(account.ID)
+	}
 }
 
 // parseOpenAIRateLimitResetTime 解析 OpenAI 兼容格式的 429 响应，返回重置时间的 Unix 时间戳
@@ -1979,7 +1998,7 @@ func parseOpenAIRateLimitPlanType(body []byte) string {
 }
 
 func persistOpenAI429PlanType(ctx context.Context, repo AccountRepository, account *Account, body []byte) {
-	if repo == nil || account == nil || account.Platform != PlatformOpenAI {
+	if repo == nil || account == nil || account.Platform != PlatformOpenAI || wayviahealth.CredentialGuards(ctx) != nil {
 		return
 	}
 	// spark 影子账号恒不持凭据:即便收到带 plan_type 的 429,也不能把 plan_type 写进影子 credentials
@@ -2045,7 +2064,7 @@ func (s *RateLimitService) handle529(ctx context.Context, account *Account) {
 	}
 
 	until := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
-	s.notifyAccountSchedulingBlocked(account, until, "529")
+	s.notifyAccountSchedulingBlocked(account, until, "529", ctx)
 	if err := s.accountRepo.SetOverloaded(ctx, account.ID, until); err != nil {
 		slog.Warn("overload_set_failed", "account_id", account.ID, "error", err)
 		return
@@ -2342,7 +2361,7 @@ func (s *RateLimitService) GetTempUnschedStatus(ctx context.Context, accountID i
 		}
 	}
 
-	if s.tempUnschedCache != nil {
+	if s.tempUnschedCache != nil && wayviahealth.CredentialGuards(ctx) == nil {
 		if err := s.tempUnschedCache.SetTempUnsched(ctx, accountID, state); err != nil {
 			slog.Warn("temp_unsched_cache_set_failed", "account_id", accountID, "error", err)
 		}
@@ -2874,13 +2893,13 @@ func (s *RateLimitService) triggerTempUnschedulable(ctx context.Context, account
 		return true
 	}
 
-	s.notifyAccountSchedulingBlocked(account, until, "temp_unschedulable")
+	s.notifyAccountSchedulingBlocked(account, until, "temp_unschedulable", ctx)
 	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); err != nil {
 		slog.Warn("temp_unsched_set_failed", "account_id", account.ID, "error", err)
 		return false
 	}
 
-	if s.tempUnschedCache != nil {
+	if s.tempUnschedCache != nil && wayviahealth.CredentialGuards(ctx) == nil {
 		if err := s.tempUnschedCache.SetTempUnsched(ctx, account.ID, state); err != nil {
 			slog.Warn("temp_unsched_cache_set_failed", "account_id", account.ID, "error", err)
 		}
@@ -2979,13 +2998,13 @@ func (s *RateLimitService) triggerStreamTimeoutTempUnsched(ctx context.Context, 
 		reason = state.ErrorMessage
 	}
 
-	s.notifyAccountSchedulingBlocked(account, until, "stream_timeout_temp_unschedulable")
+	s.notifyAccountSchedulingBlocked(account, until, "stream_timeout_temp_unschedulable", ctx)
 	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); err != nil {
 		slog.Warn("stream_timeout_set_temp_unsched_failed", "account_id", account.ID, "error", err)
 		return false
 	}
 
-	if s.tempUnschedCache != nil {
+	if s.tempUnschedCache != nil && wayviahealth.CredentialGuards(ctx) == nil {
 		if err := s.tempUnschedCache.SetTempUnsched(ctx, account.ID, state); err != nil {
 			slog.Warn("stream_timeout_set_temp_unsched_cache_failed", "account_id", account.ID, "error", err)
 		}
@@ -3006,7 +3025,7 @@ func (s *RateLimitService) triggerStreamTimeoutTempUnsched(ctx context.Context, 
 func (s *RateLimitService) triggerStreamTimeoutError(ctx context.Context, account *Account, model string) bool {
 	errorMsg := "Stream data interval timeout (repeated failures) for model: " + model
 
-	s.notifyAccountSchedulingBlocked(account, time.Time{}, "stream_timeout_error")
+	s.notifyAccountSchedulingBlocked(account, time.Time{}, "stream_timeout_error", ctx)
 	if err := s.accountRepo.SetError(ctx, account.ID, errorMsg); err != nil {
 		slog.Warn("stream_timeout_set_error_failed", "account_id", account.ID, "error", err)
 		return false

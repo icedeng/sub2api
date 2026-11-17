@@ -134,6 +134,7 @@ type OpenAIQuotaResetResult struct {
 // for OpenAI OAuth accounts. It reuses the privacy client factory so all calls
 // flow through the impersonated HTTP client (Cloudflare-friendly TLS fingerprint).
 type OpenAIQuotaService struct {
+	health               *WayviaHealthService
 	accountRepo          AccountRepository
 	proxyRepo            ProxyRepository
 	tokenProvider        *OpenAITokenProvider
@@ -171,6 +172,14 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 		return nil, err
 	}
 
+	requestAccount, _ := s.accountRepo.GetByID(ctx, accountID)
+	if s.health != nil {
+		owner, _ := resolveCredentialAccount(ctx, s.accountRepo, requestAccount)
+		if owner == nil || owner.GetOpenAIAccessToken() != accessToken {
+			requestAccount = nil
+		}
+		ctx = s.health.requestContext(ctx, requestAccount, owner, "quota")
+	}
 	ctx = wayviaegress.WithAccount(ctx, accountID, "query")
 	client, err := accountPrivacyClient(ctx, s.privacyClientFactory, proxyURL)
 	if err != nil {
@@ -193,6 +202,9 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 			SetSuccessResult(&payload).
 			Get(chatGPTUsageURL)
 		if err != nil {
+			if s.health != nil {
+				s.health.ObserveFailure(ctx, requestAccount, 0, nil, nil, "quota", "")
+			}
 			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_REQUEST_FAILED", "upstream request failed: %v", err)
 		}
 		if !resp.IsSuccessState() {
@@ -204,12 +216,15 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 				continue
 			}
 			status := resp.StatusCode
+			if s.health != nil {
+				s.health.HandleFailure(ctx, requestAccount, status, resp.Header, []byte(truncate(resp.String(), 16384)), "quota", "")
+			}
 			if isOpenAIAutoResetContext(ctx) {
 				slog.Warn("openai_quota_query_failed", "account_id", accountID, "status", status, "source", "auto_reset")
 				return nil, infraerrors.Newf(mapUpstreamStatus(status), "OPENAI_QUOTA_UPSTREAM_ERROR", "upstream returned %d", status)
 			}
 			body := truncate(s.redactQuotaErrorBody(ctx, accountID, resp.String()), 240)
-			slog.Warn("openai_quota_query_failed", "account_id", accountID, "status", status, "body", body)
+			slog.Warn("openai_quota_query_failed", "account_id", accountID, "status", status)
 			return nil, infraerrors.Newf(mapUpstreamStatus(status), "OPENAI_QUOTA_UPSTREAM_ERROR", "upstream returned %d: %s", status, body)
 		}
 		break
@@ -316,6 +331,16 @@ func (s *OpenAIQuotaService) cacheResetCreditsSnapshot(ctx context.Context, acco
 }
 
 func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client *req.Client, accessToken, chatGPTAccountID string, fedRAMP bool, accountID int64) *openAIRateLimitResetCreditDetails {
+	var requestAccount *Account
+	if s.health != nil {
+		requestAccount, _ = s.accountRepo.GetByID(ctx, accountID)
+		owner, _ := resolveCredentialAccount(ctx, s.accountRepo, requestAccount)
+		if owner == nil || owner.GetOpenAIAccessToken() != accessToken {
+			requestAccount = nil
+		}
+		ctx = s.health.requestContext(ctx, requestAccount, owner, "quota_details")
+	}
+
 	quotaHeaders, _, headerErr := s.buildCodexQuotaHeaders(ctx, accountID, accessToken, chatGPTAccountID, fedRAMP)
 	if headerErr != nil {
 		slog.Warn("openai_quota_reset_credit_details_auth_failed", "account_id", accountID, "error", headerErr)
@@ -326,10 +351,16 @@ func (s *OpenAIQuotaService) queryResetCreditDetails(ctx context.Context, client
 		SetHeaders(quotaHeaders).
 		Get(chatGPTRateLimitCreditsURL)
 	if err != nil {
-		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID, "error", err)
+		if s.health != nil {
+			s.health.ObserveFailure(ctx, requestAccount, 0, nil, nil, "quota_details", "")
+		}
+		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID)
 		return nil
 	}
 	if !resp.IsSuccessState() {
+		if s.health != nil {
+			s.health.HandleFailure(ctx, requestAccount, resp.StatusCode, resp.Header, []byte(truncate(resp.String(), 16384)), "quota_details", "")
+		}
 		slog.Warn("openai_quota_reset_credit_details_failed", "account_id", accountID, "status", resp.StatusCode)
 		return nil
 	}

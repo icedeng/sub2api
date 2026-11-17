@@ -157,15 +157,27 @@ func resolveOpenAIWSHTTPBridgeToolOutputs(items, available []json.RawMessage) ([
 		}
 	}
 	result := append([]json.RawMessage(nil), items...)
+	// available 的前段是已有连接历史，尾段是本次 input。后续才出现的调用
+	// 尚未进入待处理集合，不能让此前唯一可关联的结果产生歧义。
+	seenCalls := make(map[string]bool)
+	for _, raw := range available[:len(available)-len(items)] {
+		item := gjson.ParseBytes(raw)
+		if isCodexToolCallContextItemType(item.Get("type").String()) {
+			seenCalls[strings.TrimSpace(item.Get("call_id").String())] = true
+		}
+	}
 	for i, raw := range items {
 		item := gjson.ParseBytes(raw)
 		typ := item.Get("type").String()
+		if isCodexToolCallContextItemType(typ) {
+			seenCalls[strings.TrimSpace(item.Get("call_id").String())] = true
+		}
 		if !isCodexToolCallOutputItemType(typ) || strings.TrimSpace(item.Get("call_id").String()) != "" {
 			continue
 		}
 		var matches []string
 		for id, call := range calls {
-			if ambiguous[id] || resolved[id] || (call.Get("type").String()+"_output" != typ && !(typ == "tool_search_output" && call.Get("type").String() == "tool_search_call")) {
+			if !seenCalls[id] || ambiguous[id] || resolved[id] || (call.Get("type").String()+"_output" != typ && !(typ == "tool_search_output" && call.Get("type").String() == "tool_search_call")) {
 				continue
 			}
 			if name := item.Get("name").String(); name != "" && name != call.Get("name").String() {

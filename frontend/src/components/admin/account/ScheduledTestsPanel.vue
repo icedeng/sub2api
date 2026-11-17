@@ -6,6 +6,10 @@
     @close="emit('close')"
   >
     <div class="space-y-4">
+      <details v-if="show && accountId" class="rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+        <summary class="cursor-pointer text-sm font-medium">账号健康策略与检测历史</summary>
+        <AccountHealthPanel class="mt-3" :account-id="accountId" />
+      </details>
       <!-- Add Plan Button -->
       <div class="flex items-center justify-between">
         <p class="text-sm text-gray-500 dark:text-gray-400">
@@ -103,11 +107,12 @@
                 {{ t('admin.scheduledTests.autoRecover') }}
               </label>
               <p class="mt-0.5 text-xs text-gray-400 dark:text-gray-500">
-                {{ t('admin.scheduledTests.autoRecoverHelp') }}
+                仅恢复本模块管理的临时状态；人工暂停、额度和其他模型限流保持。
               </p>
             </div>
           </div>
         </div>
+        <HealthContentInput v-model="newPlan.test_content" class="mt-3" :disabled="creating" />
         <div class="mt-3 flex justify-end gap-2">
           <button
             @click="showAddForm = false; resetNewPlan()"
@@ -313,11 +318,12 @@
                     {{ t('admin.scheduledTests.autoRecover') }}
                   </label>
                   <p class="mt-0.5 text-xs text-gray-400 dark:text-gray-500">
-                    {{ t('admin.scheduledTests.autoRecoverHelp') }}
+                    仅恢复本模块管理的临时状态；人工暂停、额度和其他模型限流保持。
                   </p>
                 </div>
               </div>
             </div>
+            <HealthContentInput v-model="editForm.test_content" class="mt-3" :disabled="updating" />
             <div class="mt-3 flex justify-end gap-2">
               <button
                 @click="cancelEdit"
@@ -463,6 +469,8 @@
 </template>
 
 <script setup lang="ts">
+import AccountHealthPanel from './AccountHealthPanel.vue'
+import HealthContentInput from './HealthContentInput.vue'
 import { ref, reactive, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -511,6 +519,7 @@ const deletingPlan = ref<ScheduledTestPlan | null>(null)
 const editingPlanId = ref<number | null>(null)
 const updating = ref(false)
 const editForm = reactive({
+  test_content: null as string | null,
   model_id: '' as string,
   cron_expression: '' as string,
   max_results: '100' as string,
@@ -519,6 +528,7 @@ const editForm = reactive({
 })
 
 const newPlan = reactive({
+  test_content: null as string | null,
   model_id: '' as string,
   cron_expression: '' as string,
   max_results: '100' as string,
@@ -527,6 +537,7 @@ const newPlan = reactive({
 })
 
 const resetNewPlan = () => {
+  newPlan.test_content = null
   newPlan.model_id = ''
   newPlan.cron_expression = ''
   newPlan.max_results = '100'
@@ -570,6 +581,7 @@ const handleCreate = async () => {
     const maxResults = Number(newPlan.max_results) || 100
     await adminAPI.scheduledTests.create({
       account_id: props.accountId,
+      test_content: newPlan.test_content,
       model_id: newPlan.model_id,
       cron_expression: newPlan.cron_expression,
       enabled: newPlan.enabled,
@@ -602,6 +614,7 @@ const handleToggleEnabled = async (plan: ScheduledTestPlan, enabled: boolean) =>
 
 const startEdit = (plan: ScheduledTestPlan) => {
   editingPlanId.value = plan.id
+  editForm.test_content = plan.test_content ?? null
   editForm.model_id = plan.model_id
   editForm.cron_expression = plan.cron_expression
   editForm.max_results = String(plan.max_results)
@@ -618,6 +631,7 @@ const handleEdit = async () => {
   updating.value = true
   try {
     const updated = await adminAPI.scheduledTests.update(editingPlanId.value, {
+      test_content: editForm.test_content,
       model_id: editForm.model_id,
       cron_expression: editForm.cron_expression,
       max_results: Number(editForm.max_results) || 100,

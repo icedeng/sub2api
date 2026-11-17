@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -48,6 +49,9 @@ func (s *ScheduledTestRunnerService) Start() {
 		return
 	}
 	s.startOnce.Do(func() {
+		if s.accountTestSvc != nil && s.accountTestSvc.health != nil {
+			s.accountTestSvc.health.Start()
+		}
 		loc := time.Local
 		if s.cfg != nil {
 			if parsed, err := time.LoadLocation(s.cfg.Timezone); err == nil && parsed != nil {
@@ -73,6 +77,9 @@ func (s *ScheduledTestRunnerService) Stop() {
 		return
 	}
 	s.stopOnce.Do(func() {
+		if s.accountTestSvc != nil && s.accountTestSvc.health != nil {
+			s.accountTestSvc.health.Stop()
+		}
 		if s.cron != nil {
 			ctx := s.cron.Stop()
 			select {
@@ -120,7 +127,11 @@ func (s *ScheduledTestRunnerService) runScheduled() {
 }
 
 func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *ScheduledTestPlan) {
-	result, err := s.accountTestSvc.RunTestBackground(ctx, plan.AccountID, plan.ModelID)
+	key := fmt.Sprintf("%d:%s", plan.ID, plan.CreatedAt.UTC().Format(time.RFC3339Nano))
+	if plan.NextRunAt != nil {
+		key = fmt.Sprintf("%d:%s", plan.ID, plan.NextRunAt.UTC().Format(time.RFC3339Nano))
+	}
+	result, err := s.accountTestSvc.RunTestBackground(ctx, plan.AccountID, plan.ModelID, AccountTestOptions{HealthSource: "scheduled", HealthPlanID: plan.ID, HealthScheduleKey: key, HealthAutoRecover: plan.AutoRecover})
 	if err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d RunTestBackground error: %v", plan.ID, err)
 		return
@@ -131,7 +142,7 @@ func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *Sched
 	}
 
 	// Auto-recover account if test succeeded and auto_recover is enabled.
-	if result.Status == "success" && plan.AutoRecover {
+	if result.Status == "success" && plan.AutoRecover && (s.accountTestSvc.health == nil || !s.accountTestSvc.health.managesAccount(ctx, plan.AccountID, plan.ModelID)) {
 		s.tryRecoverAccount(ctx, plan.AccountID, plan.ID)
 	}
 

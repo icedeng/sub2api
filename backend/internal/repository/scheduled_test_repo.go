@@ -19,12 +19,17 @@ func NewScheduledTestPlanRepository(db *sql.DB) service.ScheduledTestPlanReposit
 }
 
 func (r *scheduledTestPlanRepository) Create(ctx context.Context, plan *service.ScheduledTestPlan) (*service.ScheduledTestPlan, error) {
-	row := r.db.QueryRowContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	row := tx.QueryRowContext(ctx, `
 		INSERT INTO scheduled_test_plans (account_id, model_id, cron_expression, enabled, max_results, auto_recover, next_run_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 		RETURNING id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at
 	`, plan.AccountID, plan.ModelID, plan.CronExpression, plan.Enabled, plan.MaxResults, plan.AutoRecover, plan.NextRunAt)
-	return scanPlan(row)
+	return savePlanContent(ctx, tx, row, plan.TestContent)
 }
 
 func (r *scheduledTestPlanRepository) GetByID(ctx context.Context, id int64) (*service.ScheduledTestPlan, error) {
@@ -63,13 +68,31 @@ func (r *scheduledTestPlanRepository) ListDue(ctx context.Context, now time.Time
 }
 
 func (r *scheduledTestPlanRepository) Update(ctx context.Context, plan *service.ScheduledTestPlan) (*service.ScheduledTestPlan, error) {
-	row := r.db.QueryRowContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	row := tx.QueryRowContext(ctx, `
 		UPDATE scheduled_test_plans
 		SET model_id = $2, cron_expression = $3, enabled = $4, max_results = $5, auto_recover = $6, next_run_at = $7, updated_at = NOW()
 		WHERE id = $1
 		RETURNING id, account_id, model_id, cron_expression, enabled, max_results, auto_recover, last_run_at, next_run_at, created_at, updated_at
 	`, plan.ID, plan.ModelID, plan.CronExpression, plan.Enabled, plan.MaxResults, plan.AutoRecover, plan.NextRunAt)
-	return scanPlan(row)
+	return savePlanContent(ctx, tx, row, plan.TestContent)
+}
+
+// 计划和内容覆盖必须同时提交；旁表失败时不能留下半更新的计划。
+func savePlanContent(ctx context.Context, tx *sql.Tx, row *sql.Row, content *string) (*service.ScheduledTestPlan, error) {
+	p, err := scanPlan(row)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO wayvia_health_plan_content(plan_id,test_content) VALUES($1,$2) ON CONFLICT(plan_id) DO UPDATE SET test_content=EXCLUDED.test_content`, p.ID, content); err != nil {
+		return nil, err
+	}
+	p.TestContent = content
+	return p, tx.Commit()
 }
 
 func (r *scheduledTestPlanRepository) Delete(ctx context.Context, id int64) error {

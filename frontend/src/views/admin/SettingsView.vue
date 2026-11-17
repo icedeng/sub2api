@@ -37,12 +37,14 @@
                   <Icon :name="tab.icon" size="sm" />
                 </span>
                 <span class="settings-tab-label">{{
-                  t(`admin.settings.tabs.${tab.key}`)
+                  tab.key === "health" ? "账号健康" : t(`admin.settings.tabs.${tab.key}`)
                 }}</span>
               </button>
             </div>
           </nav>
         </div>
+
+        <AccountHealthSettings v-if="activeTab === 'health'" />
 
         <!-- Tab: Security — Admin API Key -->
         <div v-show="activeTab === 'security'" class="space-y-6">
@@ -8866,7 +8868,7 @@
         </div>
 
         <!-- Save dock — sticky so long tabs never require scrolling to the end -->
-        <div v-show="activeTab !== 'backup'" class="settings-save-dock">
+        <div v-show="activeTab !== 'backup' && activeTab !== 'health'" class="settings-save-dock">
           <button
             type="submit"
             :disabled="saving || loadFailed"
@@ -9013,6 +9015,7 @@ import {
   isStepUpBlocked,
   stepUpBlockReason,
 } from "@/composables/useStepUp";
+import AccountHealthSettings from "@/components/admin/settings/AccountHealthSettings.vue";
 import WayviaRuntimeControl from "@/components/admin/WayviaRuntimeControl.vue";
 import AdminAccessKeysSettings from "@/components/admin/settings/AdminAccessKeysSettings.vue";
 import TotpStepUpDialog from "@/components/auth/TotpStepUpDialog.vue";
@@ -9059,6 +9062,7 @@ const paymentMethodsHref = computed(() =>
 );
 
 type SettingsTab =
+  | "health"
   | "general"
   | "agreement"
   | "features"
@@ -9070,6 +9074,7 @@ type SettingsTab =
   | "backup";
 const activeTab = ref<SettingsTab>("general");
 const settingsTabs = [
+  { key: "health" as SettingsTab, icon: "shield" as const },
   { key: "general" as SettingsTab, icon: "home" as const },
   { key: "agreement" as SettingsTab, icon: "document" as const },
   { key: "features" as SettingsTab, icon: "bolt" as const },

@@ -405,6 +405,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			ReasoningEffort:               reasoningEffort,
 			ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, serviceTier),
 			Stream:                        true,
+			ClientDisconnect:              clientDisconnected,
 			Duration:                      time.Since(startTime),
 			FirstTokenMs:                  firstTokenMs,
 		}

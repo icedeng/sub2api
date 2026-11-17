@@ -33,6 +33,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
+	"github.com/Wei-Shaw/sub2api/internal/wayviahealth"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -68,8 +69,14 @@ type TestEvent struct {
 // AccountTestOptions carries optional media for admin connectivity tests.
 // ImageDataURL / AudioDataURL are full data URLs (data:<mime>;base64,...).
 type AccountTestOptions struct {
-	ImageDataURL string
-	AudioDataURL string
+	TextContent       *string
+	HealthSource      string
+	HealthPlanID      int64
+	HealthRunID       string
+	HealthScheduleKey string
+	HealthAutoRecover bool
+	ImageDataURL      string
+	AudioDataURL      string
 }
 
 func firstAccountTestOptions(opts []AccountTestOptions) AccountTestOptions {
@@ -138,6 +145,7 @@ func normalizeGrokAccountTestMode(mode string) string {
 
 // AccountTestService handles account testing operations
 type AccountTestService struct {
+	health                    *WayviaHealthService
 	accountRepo               AccountRepository
 	geminiTokenProvider       *GeminiTokenProvider
 	claudeTokenProvider       *ClaudeTokenProvider
@@ -358,7 +366,7 @@ func createTestPayload(modelID string) (map[string]any, error) {
 // modelID is optional - if empty, defaults to claude.DefaultTestModel
 // mode is optional - "compact" routes OpenAI accounts to the /responses/compact probe path
 // opts is optional media (image/audio data URLs for real generation / STT).
-func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int64, modelID string, prompt string, mode string, opts ...AccountTestOptions) error {
+func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int64, modelID string, prompt string, mode string, opts ...AccountTestOptions) (testErr error) {
 	initAccountTestLogger(c, accountID, modelID, mode)
 	ctx := c.Request.Context()
 	testOpts := firstAccountTestOptions(opts)
@@ -369,6 +377,24 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.sendErrorAndEnd(c, "Account not found")
 	}
 	bindAccountTestPlatform(c, account)
+
+	// 文本探测共用策略、内容、租约和结果；媒体与 Agent Identity 保留专用流程。
+	textTest := normalizeAccountTestMode(mode) != AccountTestModeCompact && !isOpenAIImageModel(account.GetMappedModel(modelID)) && testOpts.ImageDataURL == "" && testOpts.AudioDataURL == ""
+	managed := s.health != nil && textTest && s.health.managesAccount(ctx, account.ID, modelID)
+	if testOpts.HealthRunID != "" && !managed {
+		return s.sendErrorAndEnd(c, "账号或模型已不支持统一文本检测，取消旧任务")
+	}
+	if managed {
+		var finish func(error)
+		modelID, prompt, finish, err = s.health.prepare(c, account, modelID, prompt, testOpts)
+		if err != nil {
+			return s.sendErrorAndEnd(c, err.Error())
+		}
+		defer func() { finish(testErr) }()
+		account = c.Request.Context().Value(healthSessionKey{}).(*healthSession).account
+	} else if testOpts.TextContent != nil {
+		return s.sendErrorAndEnd(c, "不支持该检测类型的全局文本模板")
+	}
 
 	// Synthetic UI load-test accounts exercise the real SSE parsing and modal
 	// interactions, but intentionally do not send their placeholder credentials
@@ -890,7 +916,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	if isOAuth {
 		upstreamTestModelID = normalizeOpenAIModelForUpstream(credentialAccount, testModelID)
 	}
-	payload := createOpenAITestPayload(upstreamTestModelID, isOAuth)
+	payload := createOpenAITestPayload(upstreamTestModelID, isOAuth, prompt)
 	payloadBytes, _ := json.Marshal(payload)
 
 	// Send test_start event once. A task-invalid Agent Identity response may
@@ -958,9 +984,16 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	defer func() { _ = resp.Body.Close() }()
 
 	if isOAuth && s.accountRepo != nil {
+		stateCtx := ctx
+		if session, ok := ctx.Value(healthSessionKey{}).(*healthSession); ok {
+			stateCtx = wayviahealth.WithCredentialGuard(ctx, session.owner.ID, session.owner.Credentials)
+			stateCtx = wayviahealth.WithCredentialGuard(stateCtx, account.ID, account.Credentials)
+		}
 		if updates, err := extractOpenAICodexProbeUpdates(resp); err == nil && len(updates) > 0 {
-			_ = s.accountRepo.UpdateExtra(ctx, account.ID, updates)
-			mergeAccountExtra(account, updates)
+			_ = s.accountRepo.UpdateExtra(stateCtx, account.ID, updates)
+			if !HealthTestManaged(ctx) {
+				mergeAccountExtra(account, updates)
+			}
 		}
 	}
 
@@ -975,14 +1008,10 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 			c.Request = c.Request.WithContext(markAgentIdentityTaskRecoveryTried(ctx))
 			return s.testOpenAIAccountConnection(c, account, modelID, prompt, mode)
 		}
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if resp.StatusCode == http.StatusTooManyRequests && !HealthTestManaged(ctx) {
 			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
 		}
-		// 401 Unauthorized: 标记账号为永久错误
-		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
-			errMsg := fmt.Sprintf("Authentication failed (401): %s", string(body))
-			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
-		}
+		s.handleHealthTestFailure(ctx, account, resp.StatusCode, resp.Header, body, testModelID)
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
@@ -2159,6 +2188,11 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 		proxyURL = account.Proxy.URL()
 	}
 
+	if s.health != nil {
+		if err := s.health.beforeSend(ctx); err != nil {
+			return s.sendErrorAndEnd(c, err.Error())
+		}
+	}
 	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Chat Completions API (/v1/chat/completions) request failed: %s", err.Error()))
@@ -2167,13 +2201,10 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if resp.StatusCode == http.StatusTooManyRequests && !HealthTestManaged(ctx) {
 			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
 		}
-		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
-			errMsg := fmt.Sprintf("Chat Completions authentication failed (401): %s", string(body))
-			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
-		}
+		s.handleHealthTestFailure(ctx, account, resp.StatusCode, resp.Header, body, testModelID)
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Chat Completions API (/v1/chat/completions) returned %d: %s", resp.StatusCode, string(body)))
 	}
 
@@ -2325,16 +2356,13 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 			mergeAccountExtra(account, updates)
 		}
 		// 探测如返回 429,主动同步限流状态,避免后续短时间内继续选中。
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if resp.StatusCode == http.StatusTooManyRequests && !HealthTestManaged(ctx) {
 			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
 		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
-			errMsg := fmt.Sprintf("Authentication failed (401): %s", string(body))
-			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
-		}
+		s.handleHealthTestFailure(ctx, account, resp.StatusCode, resp.Header, body, testModelID)
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
@@ -2782,7 +2810,11 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 }
 
 // createOpenAITestPayload creates a test payload for OpenAI Responses API
-func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
+func createOpenAITestPayload(modelID string, isOAuth bool, prompts ...string) map[string]any {
+	text := "hi"
+	if len(prompts) > 0 && strings.TrimSpace(prompts[0]) != "" {
+		text = prompts[0]
+	}
 	payload := map[string]any{
 		"model": modelID,
 		"input": []map[string]any{
@@ -2791,7 +2823,7 @@ func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
 				"content": []map[string]any{
 					{
 						"type": "input_text",
-						"text": "hi",
+						"text": text,
 					},
 				},
 			},
@@ -2913,6 +2945,9 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 
 		jsonStr := sseDataPrefix.ReplaceAllString(line, "")
 		if jsonStr == "[DONE]" {
+			if !seenFinish {
+				return s.sendErrorAndEnd(c, "response.incomplete: missing finish_reason")
+			}
 			s.sendEvent(c, TestEvent{Type: "status", Text: "已通过 /v1/chat/completions 验证"})
 			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 			return nil
@@ -2925,6 +2960,7 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 		seenJSON = true
 
 		if errData, ok := data["error"].(map[string]any); ok {
+			s.handleHealthStreamFailure(c, data)
 			errorMsg := "Chat Completions API (/v1/chat/completions) returned an error"
 			if msg, ok := errData["message"].(string); ok && msg != "" {
 				errorMsg = msg
@@ -2952,6 +2988,9 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 				}
 			}
 			if finishReason, ok := choice["finish_reason"].(string); ok && finishReason != "" {
+				if finishReason == "length" {
+					return s.sendErrorAndEnd(c, "response.incomplete: output limit reached")
+				}
 				seenFinish = true
 			}
 		}
@@ -3004,9 +3043,22 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 				s.sendEvent(c, TestEvent{Type: "content", Text: delta})
 			}
 		case "response.completed", "response.done":
+			if responseData, ok := data["response"].(map[string]any); ok {
+				status, _ := responseData["status"].(string)
+				if status != "" && status != "completed" {
+					return s.sendErrorAndEnd(c, "response.incomplete: "+status)
+				}
+				if responseData["error"] != nil {
+					s.handleHealthStreamFailure(c, data)
+					return s.sendErrorAndEnd(c, "response.failed")
+				}
+			}
 			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 			return nil
+		case "response.incomplete":
+			return s.sendErrorAndEnd(c, "response.incomplete")
 		case "response.failed":
+			s.handleHealthStreamFailure(c, data)
 			errorMsg := "OpenAI response failed"
 			if responseData, ok := data["response"].(map[string]any); ok {
 				if errData, ok := responseData["error"].(map[string]any); ok {
@@ -3017,8 +3069,10 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 			}
 			return s.sendErrorAndEnd(c, errorMsg)
 		case "error":
+			s.handleHealthStreamFailure(c, data)
 			errorMsg := "Unknown error"
 			if errData, ok := data["error"].(map[string]any); ok {
+				s.handleHealthStreamFailure(c, data)
 				if msg, ok := errData["message"].(string); ok {
 					errorMsg = msg
 				}
@@ -3282,6 +3336,9 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 }
 
 func (s *AccountTestService) sendEvent(c *gin.Context, event TestEvent) {
+	if session, _ := c.Request.Context().Value(healthSessionKey{}).(*healthSession); session != nil && event.Type == "test_complete" && event.Success {
+		session.complete = true
+	}
 	if event.Type == "test_complete" {
 		if suppress, ok := c.Get(accountTestSuppressCompletionContextKey); ok {
 			if suppressCompletion, _ := suppress.(bool); suppressCompletion {
@@ -3299,6 +3356,14 @@ func (s *AccountTestService) sendEvent(c *gin.Context, event TestEvent) {
 
 // sendErrorAndEnd sends an error event and ends the stream
 func (s *AccountTestService) sendErrorAndEnd(c *gin.Context, errorMsg string) error {
+	if session, _ := c.Request.Context().Value(healthSessionKey{}).(*healthSession); session != nil {
+		if session.run.Reason != "" {
+			errorMsg = session.run.Reason
+		} else {
+			session.run.ErrorClass, errorMsg = healthClassifyError(fmt.Errorf("%s", errorMsg))
+			session.run.Reason = errorMsg
+		}
+	}
 	logAccountTestError(c, errorMsg)
 	s.sendEvent(c, TestEvent{Type: "error", Error: errorMsg})
 	return fmt.Errorf("%s", errorMsg)
@@ -3306,7 +3371,7 @@ func (s *AccountTestService) sendErrorAndEnd(c *gin.Context, errorMsg string) er
 
 // RunTestBackground executes an account test in-memory (no real HTTP client),
 // capturing SSE output via httptest.NewRecorder, then parses the result.
-func (s *AccountTestService) RunTestBackground(ctx context.Context, accountID int64, modelID string) (*ScheduledTestResult, error) {
+func (s *AccountTestService) RunTestBackground(ctx context.Context, accountID int64, modelID string, opts ...AccountTestOptions) (*ScheduledTestResult, error) {
 	startedAt := time.Now()
 
 	w := httptest.NewRecorder()
@@ -3314,7 +3379,7 @@ func (s *AccountTestService) RunTestBackground(ctx context.Context, accountID in
 	ginCtx.Request = (&http.Request{}).WithContext(ctx)
 	ginCtx.Set(accountTestBackgroundKey, true)
 
-	testErr := s.TestAccountConnection(ginCtx, accountID, modelID, "", AccountTestModeDefault)
+	testErr := s.TestAccountConnection(ginCtx, accountID, modelID, "", AccountTestModeDefault, opts...)
 
 	finishedAt := time.Now()
 	body := w.Body.String()

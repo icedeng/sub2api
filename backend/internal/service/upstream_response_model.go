@@ -36,6 +36,7 @@ type upstreamResponseModelObserver struct {
 	firstTier         string
 	firstTierConflict bool
 	terminalTier      string
+	healthTerminal    healthTerminalEvidence
 }
 
 func (o *upstreamResponseModelObserver) Observe(model string, terminal bool) {
@@ -69,6 +70,9 @@ func normalizeObservedUpstreamResponseModel(model string) string {
 }
 
 func (o *upstreamResponseModelObserver) ObserveOpenAI(payload []byte, eventType string) {
+	if o != nil {
+		o.healthTerminal.observe(payload, eventType)
+	}
 	model := firstValidTrimmedGJSONString(payload, "response.model", "model")
 	terminal := isUpstreamResponseModelTerminalEvent(eventType)
 	o.Observe(model, terminal)

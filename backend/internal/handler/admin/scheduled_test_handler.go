@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -20,20 +21,22 @@ func NewScheduledTestHandler(scheduledTestSvc *service.ScheduledTestService) *Sc
 }
 
 type createScheduledTestPlanRequest struct {
-	AccountID      int64  `json:"account_id" binding:"required"`
-	ModelID        string `json:"model_id"`
-	CronExpression string `json:"cron_expression" binding:"required"`
-	Enabled        *bool  `json:"enabled"`
-	MaxResults     int    `json:"max_results"`
-	AutoRecover    *bool  `json:"auto_recover"`
+	TestContent    *string `json:"test_content"`
+	AccountID      int64   `json:"account_id" binding:"required"`
+	ModelID        string  `json:"model_id"`
+	CronExpression string  `json:"cron_expression" binding:"required"`
+	Enabled        *bool   `json:"enabled"`
+	MaxResults     int     `json:"max_results"`
+	AutoRecover    *bool   `json:"auto_recover"`
 }
 
 type updateScheduledTestPlanRequest struct {
-	ModelID        string `json:"model_id"`
-	CronExpression string `json:"cron_expression"`
-	Enabled        *bool  `json:"enabled"`
-	MaxResults     int    `json:"max_results"`
-	AutoRecover    *bool  `json:"auto_recover"`
+	TestContent    json.RawMessage `json:"test_content"`
+	ModelID        string          `json:"model_id"`
+	CronExpression string          `json:"cron_expression"`
+	Enabled        *bool           `json:"enabled"`
+	MaxResults     int             `json:"max_results"`
+	AutoRecover    *bool           `json:"auto_recover"`
 }
 
 // ListByAccount GET /admin/accounts/:id/scheduled-test-plans
@@ -61,6 +64,7 @@ func (h *ScheduledTestHandler) Create(c *gin.Context) {
 	}
 
 	plan := &service.ScheduledTestPlan{
+		TestContent:    req.TestContent,
 		AccountID:      req.AccountID,
 		ModelID:        req.ModelID,
 		CronExpression: req.CronExpression,
@@ -102,6 +106,12 @@ func (h *ScheduledTestHandler) Update(c *gin.Context) {
 		return
 	}
 
+	if req.TestContent != nil {
+		if err := json.Unmarshal(req.TestContent, &existing.TestContent); err != nil {
+			response.BadRequest(c, "无效测活内容")
+			return
+		}
+	}
 	if req.ModelID != "" {
 		existing.ModelID = req.ModelID
 	}

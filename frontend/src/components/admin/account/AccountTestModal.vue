@@ -56,6 +56,11 @@
         </p>
       </div>
 
+      <div v-if="supportsHealthText" class="space-y-2">
+        <p class="text-xs text-gray-500">生效内容：{{ healthContentSources[effectiveHealth?.content_source || 'global'] }} · {{ effectiveHealth?.timezone }}</p>
+        <HealthContentInput v-model="healthContent" :inherited="effectiveHealth?.template" :disabled="status === 'connecting'" />
+      </div>
+      <p v-else-if="effectiveHealth && !effectiveHealth.supported" class="text-xs text-amber-700">当前账号不支持统一文本健康检测，保留原专项测试流程。</p>
       <div v-if="showModelSelect" class="space-y-1.5">
         <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
           {{ t('admin.accounts.selectTestModel') }}
@@ -375,6 +380,8 @@ import { useClipboard } from '@/composables/useClipboard'
 import { buildApiUrl } from '@/api/client'
 import { ADMIN_UI_REQUEST_HEADER } from '@/api/adminUIRequest'
 import { adminAPI } from '@/api/admin'
+import HealthContentInput from './HealthContentInput.vue'
+import { healthAPI, healthContentSources, type HealthEffective } from '@/api/admin/account-health'
 import type { Account, ClaudeModel } from '@/types'
 
 const { t } = useI18n()
@@ -407,6 +414,9 @@ const errorMessage = ref('')
 const availableModels = ref<ClaudeModel[]>([])
 const selectedModelId = ref('')
 const testPrompt = ref('')
+const healthContent = ref<string | null>(null)
+const effectiveHealth = ref<HealthEffective>()
+const supportsHealthText = computed(() => effectiveHealth.value?.supported && testMode.value === 'default' && !supportsOpenAIImageTest.value)
 const loadingModels = ref(false)
 let abortController: AbortController | null = null
 const generatedImages = ref<PreviewMedia[]>([])
@@ -737,11 +747,23 @@ watch(
   () => props.show,
   async (newVal) => {
     if (newVal && props.account) {
+      healthContent.value = null
+      effectiveHealth.value = undefined
       testPrompt.value = ''
       testMode.value = 'default'
       grokTestMode.value = 'text'
       resetState()
       await loadAvailableModels()
+      if (props.account?.platform === 'openai') {
+        const accountID = props.account.id
+        try {
+          const effective = await healthAPI.policy(accountID)
+          if (props.show && props.account?.id === accountID) {
+            effectiveHealth.value = effective
+            if (availableModels.value.some(model => model.id === effective.model)) selectedModelId.value = effective.model
+          }
+        } catch { /* 旧服务兼容：继续使用已有测试入口。 */ }
+      }
       if (isGrokAccount.value) {
         pickDefaultModelForMode()
         applyDefaultPromptForMode()
@@ -847,6 +869,7 @@ const startTest = async () => {
     const requestBody: {
       model_id: string
       prompt: string
+      test_content?: string | null
       mode?: string
       image_data_url?: string
       audio_data_url?: string
@@ -854,6 +877,7 @@ const startTest = async () => {
       model_id: showModelSelect.value ? selectedModelId.value : '',
       prompt: supportsPromptInput.value ? testPrompt.value.trim() : ''
     }
+    if (supportsHealthText.value) { requestBody.test_content = healthContent.value; requestBody.prompt = '' }
     if (isOpenAIAccount.value) {
       requestBody.mode = testMode.value
     }
@@ -948,8 +972,12 @@ const handleEvent = (event: {
   audio_url?: string
   video_url?: string
   mime_type?: string
+  data?: { source: string; version: number; content: string }
 }) => {
   switch (event.type) {
+    case 'health_config':
+      if (event.data) addLine(`内容来源：${healthContentSources[event.data.source] || event.data.source} · 版本 ${event.data.version} · 实际内容：${event.data.content}`, 'text-gray-400')
+      break
     case 'test_start':
       addLine(t('admin.accounts.connectedToApi'), 'text-green-400')
       if (event.model) {

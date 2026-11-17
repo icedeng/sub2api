@@ -184,6 +184,7 @@
           @reset-status="handleBulkResetStatus"
           @refresh-token="handleBulkRefreshToken"
           @probe-upstream-billing="handleBulkProbeUpstreamBilling"
+          @health-test="openHealthBatch"
           @edit-selected="openBulkEditSelected"
           @edit-filtered="openBulkEditFiltered"
           @clear="clearSelection"
@@ -242,6 +243,9 @@
                 </template>
               </HelpTooltip>
               <span v-else class="font-medium text-gray-900 dark:text-white">{{ value }}</span>
+              <button type="button" class="mt-1 text-left text-xs text-gray-500 hover:text-primary-600" @click="healthAccountId = row.id">
+                {{ healthSummaries[row.id] ? `${healthStates[healthSummaries[row.id].state]} · ${healthSources[healthSummaries[row.id].source] || healthSummaries[row.id].source} · ${new Date(healthSummaries[row.id].created_at).toLocaleString()}` : '健康策略 · 暂无检测记录' }}
+              </button>
               <span
                 v-if="accountDisplayEmail(row)"
                 class="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[200px]"
@@ -469,6 +473,10 @@
     <CreateAccountModal :show="showCreate" :proxies="proxies" :groups="groups" @close="showCreate = false" @created="reload" />
     <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" @balance-updated="patchUpstreamBalance" />
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
+    <AccountHealthBatchModal :show="showHealthBatch" :selection="healthSelection" @close="showHealthBatch = false" />
+    <BaseDialog :show="healthAccountId !== null" title="账号健康" width="wide" @close="healthAccountId = null">
+      <AccountHealthPanel v-if="healthAccountId !== null" :account-id="healthAccountId" />
+    </BaseDialog>
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
@@ -529,6 +537,10 @@ import AccountBulkActionsBar from '@/components/admin/account/AccountBulkActions
 import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
 import ImportDataModal from '@/components/admin/account/ImportDataModal.vue'
 import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vue'
+import BaseDialog from '@/components/common/BaseDialog.vue'
+import AccountHealthPanel from '@/components/admin/account/AccountHealthPanel.vue'
+import AccountHealthBatchModal from '@/components/admin/account/AccountHealthBatchModal.vue'
+import { healthAPI, healthStates, healthSources, type HealthRun, type HealthSelection } from '@/api/admin/account-health'
 import AccountTestModal from '@/components/admin/account/AccountTestModal.vue'
 import AccountStatsModal from '@/components/admin/account/AccountStatsModal.vue'
 import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.vue'
@@ -1404,6 +1416,26 @@ watch(loading, (isLoading, wasLoading) => {
   }
 })
 
+const healthSummaries = ref<Record<number, HealthRun>>({})
+const healthAccountId = ref<number | null>(null)
+const showHealthBatch = ref(false)
+const healthSelection = ref<HealthSelection>({ account_ids: [] })
+const openHealthBatch = () => {
+  healthSelection.value = allResultsSelected.value ? { filters: buildBulkEditFilterSnapshot() } : { account_ids: [...selIds.value] }
+  showHealthBatch.value = true
+}
+let healthSummaryGeneration = 0
+watch(accounts, async (rows) => {
+  const generation = ++healthSummaryGeneration
+  if (!rows.length) { healthSummaries.value = {}; return }
+  try {
+    const chunks = []
+    for (let i = 0; i < rows.length; i += 200) chunks.push(healthAPI.summaries(rows.slice(i, i + 200).map(row => row.id)))
+    const results = (await Promise.all(chunks)).flat()
+    if (generation === healthSummaryGeneration) healthSummaries.value = Object.fromEntries(results.map(row => [row.account_id, row]))
+  } catch { if (generation === healthSummaryGeneration) healthSummaries.value = {} }
+})
+
 watch(accounts, (rows) => {
   const visibleIDs = new Set(rows.map((row) => String(row.id)))
   usageBatchByAccountId.value = Object.fromEntries(
@@ -1422,6 +1454,7 @@ watch(accounts, (rows) => {
 
 const isAnyModalOpen = computed(() => {
   return (
+    showHealthBatch.value || healthAccountId.value !== null ||
     showCreate.value ||
     showEdit.value ||
     showSync.value ||

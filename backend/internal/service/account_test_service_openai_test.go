@@ -504,7 +504,7 @@ func TestAccountTestService_OpenAI429WithoutResetSignalDoesNotMutateRuntimeState
 	require.Nil(t, account.RateLimitResetAt)
 }
 
-func TestAccountTestService_OpenAI401SetsPermanentErrorOnly(t *testing.T) {
+func TestAccountTestService_OpenAI401WithoutRefreshUsesSharedAuthHandling(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := newTestContext()
 
@@ -512,7 +512,7 @@ func TestAccountTestService_OpenAI401SetsPermanentErrorOnly(t *testing.T) {
 
 	repo := &openAIAccountTestRepo{}
 	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
-	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream}
+	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream, openaiGatewayService: &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo, cfg: &config.Config{}}}}
 	account := &Account{
 		ID:          80,
 		Platform:    PlatformOpenAI,
@@ -525,7 +525,7 @@ func TestAccountTestService_OpenAI401SetsPermanentErrorOnly(t *testing.T) {
 	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.4", "", "")
 	require.Error(t, err)
 	require.Equal(t, account.ID, repo.setErrorID)
-	require.Contains(t, repo.setErrorMsg, "Authentication failed (401)")
+	require.Contains(t, repo.setErrorMsg, "refresh_token missing")
 	require.Zero(t, repo.rateLimitedID)
 	require.Zero(t, repo.clearedErrorID)
 	require.Nil(t, account.RateLimitResetAt)

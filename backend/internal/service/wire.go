@@ -213,9 +213,11 @@ func ProvideOpenAIQuotaService(
 	privacyClientFactory PrivacyClientFactory,
 	referralClient OpenAIReferralClient,
 	openAIGatewayService *OpenAIGatewayService,
+	accountTestService *AccountTestService,
 ) *OpenAIQuotaService {
 	service := NewOpenAIQuotaService(accountRepo, proxyRepo, tokenProvider, privacyClientFactory, referralClient)
 	service.agentIdentityWS = openAIGatewayService
+	service.health = accountTestService.health
 	return service
 }
 
@@ -285,6 +287,11 @@ func ProvideAccountTestService(
 	openAIGatewayService *OpenAIGatewayService,
 	settingService *SettingService,
 	pluginManager *PluginManager,
+	db *sql.DB,
+	rateLimit *RateLimitService,
+	concurrency *ConcurrencyService,
+	tokens *OpenAITokenProvider,
+	audit *AuditLogService,
 ) *AccountTestService {
 	service := NewAccountTestService(
 		accountRepo,
@@ -300,6 +307,8 @@ func ProvideAccountTestService(
 	service.SetOpenAIGatewayService(openAIGatewayService)
 	service.SetSettingService(settingService)
 	service.SetPluginManager(pluginManager)
+	service.health = NewWayviaHealthService(db, accountRepo, service, rateLimit, concurrency, tokens, audit, cfg.JWT.Secret)
+	openAIGatewayService.health = service.health
 	return service
 }
 
@@ -672,8 +681,11 @@ func ProvideGeminiCachedContentService(repo GeminiCachedContentRepository, compa
 func ProvideScheduledTestService(
 	planRepo ScheduledTestPlanRepository,
 	resultRepo ScheduledTestResultRepository,
+	tester *AccountTestService,
 ) *ScheduledTestService {
-	return NewScheduledTestService(planRepo, resultRepo)
+	svc := NewScheduledTestService(planRepo, resultRepo)
+	svc.health = tester.health
+	return svc
 }
 
 // ProvideScheduledTestRunnerService creates and starts ScheduledTestRunnerService.

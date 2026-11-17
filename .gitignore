@@ -134,6 +134,7 @@ deploy/docker-compose.override.yml
 .gocache/
 vite.config.js
 docs/*
+!docs/账号健康检查实施说明.md
 !docs/wayvia-egress/
 !docs/wayvia-egress/**
 !docs/wayvia-balance/

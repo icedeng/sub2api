@@ -61,7 +61,18 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
-	return s.forwardAsChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel, false)
+	if s.health != nil {
+		ctx = s.health.requestContext(ctx, account, nil, "chat_completions")
+	}
+	result, err := s.forwardAsChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel, false)
+	if s.health != nil && err == nil {
+		s.health.observeForwardSuccess(ctx, c, account, result)
+	} else if s.health != nil && err != nil {
+		if class, _ := healthClassifyError(err); class == "network" {
+			s.health.ObserveFailure(ctx, account, 0, nil, nil, "gateway", gjson.GetBytes(body, "model").String())
+		}
+	}
+	return result, err
 }
 
 func (s *OpenAIGatewayService) forwardAsChatCompletions(

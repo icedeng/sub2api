@@ -231,3 +231,16 @@ func TestOpenAIWSHTTPBridgeReplayedMissingCallIDAcrossTurns(t *testing.T) {
 		require.Equal(t, "call_1", gjson.GetBytes(body, "input.2.call_id").String())
 	}
 }
+
+// 完整历史中的后续调用尚未发生，不能拿来让前一轮结果产生歧义。
+func TestOpenAIWSHTTPBridgeSequentialMissingCallIDs(t *testing.T) {
+	payload := []byte(`{"type":"response.create","model":"gpt-5","input":[{"type":"function_call","call_id":"call_1","name":"inspect","arguments":"{}"},{"type":"function_call_output","output":"first"},{"type":"function_call","call_id":"call_2","name":"inspect","arguments":"{}"},{"type":"function_call_output","output":"second"}]}`)
+	original := append([]byte(nil), payload...)
+	body, items, exists, err := prepareOpenAIWSHTTPBridgeContinuation(payload, "", nil, false)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Len(t, items, 4)
+	require.Equal(t, "call_1", gjson.GetBytes(body, "input.1.call_id").String())
+	require.Equal(t, "call_2", gjson.GetBytes(body, "input.3.call_id").String())
+	require.Equal(t, original, payload, "不能修改客户端原始输入")
+}

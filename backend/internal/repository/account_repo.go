@@ -30,6 +30,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
+	"github.com/Wei-Shaw/sub2api/internal/wayviahealth"
 	"github.com/lib/pq"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -143,6 +144,12 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 func createAccountRecord(ctx context.Context, client *dbent.Client, account *service.Account) error {
 	if account == nil {
 		return service.ErrAccountNilInput
+	}
+	if account.Extra == nil {
+		account.Extra = map[string]any{}
+	}
+	if _, ok := account.Extra[wayviahealth.PolicyKey]; !ok {
+		account.Extra[wayviahealth.PolicyKey] = map[string]any{"mode": "inherit"}
 	}
 	// Ent 创建结果主要来自输入，显式暂停以与数据库触发器和 API 返回值一致。
 	if account.Platform == service.PlatformOpenAI && account.Type == service.AccountTypeOAuth && account.ParentAccountID == nil {
@@ -972,8 +979,8 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 				ELSE extra
 			END,
 			updated_at = NOW()
-		WHERE id = $2 AND deleted_at IS NULL
-	`, string(payload), id)
+		WHERE id = $2 AND deleted_at IS NULL AND ($3::jsonb IS NULL OR `+healthCredentialGuardSQL("$3")+`)
+	`, string(payload), id, wayviahealth.CredentialGuards(ctx))
 	if err != nil {
 		return err
 	}
@@ -1505,14 +1512,18 @@ func (r *accountRepository) BatchUpdateLastUsed(ctx context.Context, updates map
 }
 
 func (r *accountRepository) SetError(ctx context.Context, id int64, errorMsg string) error {
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
+	guard := wayviahealth.CredentialGuards(ctx)
+	updated, err := r.client.Account.Update().
+		Where(dbaccount.IDEQ(id), healthCredentialGuardPredicate(ctx)).
 		SetStatus(service.StatusError).
 		SetErrorMessage(errorMsg).
 		SetSchedulable(false).
 		Save(ctx)
 	if err != nil {
 		return err
+	}
+	if updated == 0 && guard != nil {
+		return wayviahealth.ErrStaleCredentials
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue set error failed: account=%d err=%v", id, err)
@@ -2333,13 +2344,16 @@ func (r *accountRepository) ListModelAvailabilityCandidates(
 
 func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
 	now := time.Now()
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
+	updated, err := r.client.Account.Update().
+		Where(dbaccount.IDEQ(id), healthCredentialGuardPredicate(ctx)).
 		SetRateLimitedAt(now).
 		SetRateLimitResetAt(resetAt).
 		Save(ctx)
 	if err != nil {
 		return err
+	}
+	if updated == 0 && wayviahealth.CredentialGuards(ctx) != nil {
+		return wayviahealth.ErrStaleCredentials
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue rate limit failed: account=%d err=%v", id, err)
@@ -2494,10 +2508,11 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 				true
 			),
 			updated_at = NOW()
-		WHERE id = $3 AND deleted_at IS NULL`,
+		WHERE id = $3 AND deleted_at IS NULL AND ($4::jsonb IS NULL OR `+healthCredentialGuardSQL("$4")+`)`,
 		scope,
 		raw,
 		id,
+		wayviahealth.CredentialGuards(ctx),
 	)
 	if err != nil {
 		return err
@@ -2518,12 +2533,15 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 }
 
 func (r *accountRepository) SetOverloaded(ctx context.Context, id int64, until time.Time) error {
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
+	updated, err := r.client.Account.Update().
+		Where(dbaccount.IDEQ(id), healthCredentialGuardPredicate(ctx)).
 		SetOverloadUntil(until).
 		Save(ctx)
 	if err != nil {
 		return err
+	}
+	if updated == 0 && wayviahealth.CredentialGuards(ctx) != nil {
+		return wayviahealth.ErrStaleCredentials
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue overload failed: account=%d err=%v", id, err)
@@ -2540,8 +2558,9 @@ func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, 
 			updated_at = NOW()
 		WHERE id = $3
 			AND deleted_at IS NULL
+			AND ($4::jsonb IS NULL OR `+healthCredentialGuardSQL("$4")+`)
 			AND (temp_unschedulable_until IS NULL OR temp_unschedulable_until < $1)
-	`, until, reason, id)
+	`, until, reason, id, wayviahealth.CredentialGuards(ctx))
 	if err != nil {
 		return err
 	}
@@ -2842,8 +2861,8 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	}
 	result, err := client.ExecContext(
 		ctx,
-		"UPDATE accounts SET extra = "+extraExpression+", updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL",
-		string(payload), id,
+		"UPDATE accounts SET extra = "+extraExpression+", updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL AND ($3::jsonb IS NULL OR "+healthCredentialGuardSQL("$3")+")",
+		string(payload), id, wayviahealth.CredentialGuards(ctx),
 	)
 
 	if err != nil {
@@ -4172,4 +4191,18 @@ func wayviaReloadSnapshot() {
 
 func wayviaReloadAfterCommit(ctx context.Context) {
 	service.AfterAccountCommit(ctx, func(context.Context) { wayviaReloadSnapshot() })
+}
+
+// 健康检查的迟到结果必须同时匹配所有参与认证的账号；普通请求不附加限制。
+func healthCredentialGuardSQL(parameter string) string {
+	return "NOT EXISTS (SELECT 1 FROM jsonb_each(" + parameter + "::jsonb) guard WHERE NOT EXISTS (SELECT 1 FROM accounts guard_account WHERE guard_account.id=guard.key::bigint AND guard_account.deleted_at IS NULL AND guard_account.credentials=guard.value))"
+}
+
+func healthCredentialGuardPredicate(ctx context.Context) dbpredicate.Account {
+	return func(sel *entsql.Selector) {
+		if guard := wayviahealth.CredentialGuards(ctx); guard != nil {
+			prefix, suffix, _ := strings.Cut(healthCredentialGuardSQL("?"), "?")
+			sel.Where(entsql.P(func(b *entsql.Builder) { b.WriteString(prefix).Arg(*guard).WriteString(suffix) }))
+		}
+	}
 }

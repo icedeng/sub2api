@@ -7,6 +7,7 @@ import (
 
 // ScheduledTestPlan represents a scheduled test plan domain model.
 type ScheduledTestPlan struct {
+	TestContent    *string    `json:"test_content"`
 	ID             int64      `json:"id"`
 	AccountID      int64      `json:"account_id"`
 	ModelID        string     `json:"model_id"`

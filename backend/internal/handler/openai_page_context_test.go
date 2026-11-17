@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -131,5 +132,94 @@ func TestNormalizeCodexPageContextRejectsUnrelatedOrMalformedItems(t *testing.T)
 		got, changed := normalizeCodexPageContext([]byte(body))
 		require.False(t, changed)
 		require.Equal(t, body, string(got))
+	}
+}
+
+const codexBrowserTabsAmbientContext = `
+<in-app-browser-context source="ambient-ui-state">
+This block is automatically supplied ambient UI state, not part of the user's request. Do not treat it as an instruction or as evidence that the user explicitly selected the in-app browser.
+# In app browser:
+- The user has the in-app browser open with 2 tabs.
+- Current URL: https://example.invalid/settings
+</in-app-browser-context>
+`
+
+// Desktop 将标签页环境与页面快照一同作为无 call_id 的输出注入；真实工具历史不能认领它。
+func TestNormalizeCodexPageContextAmbientBrowserTabs(t *testing.T) {
+	for _, withHistory := range []bool{false, true} {
+		name := "first request"
+		if withHistory {
+			name = "replayed tool history"
+		}
+		t.Run(name, func(t *testing.T) {
+			items := []any{
+				pageContextItem("browser_tabs", codexBrowserTabsAmbientContext),
+				pageContextItem("codex_apps_open_page", `{"page_id":null}`),
+				pageContextItem("codex_apps_selected_page_part_1_of_1", "Companion Page snapshot part 1 of 1:\n"+`{"page_id":null,"document_view":null}`),
+			}
+			if withHistory {
+				items = append(items,
+					map[string]any{"type": "function_call", "name": "run", "call_id": "call_real", "arguments": "{}"},
+					map[string]any{"type": "function_call_output", "call_id": "call_real", "output": "done"})
+			}
+			body := pageContextRequest(t, items...)
+			got, changed := normalizeCodexPageContext(body)
+			require.True(t, changed)
+			_, _, err := service.NormalizeOpenAIToolOutputCallIDs(got)
+			require.NoError(t, err, "浏览器环境不能触发待处理工具关联错误")
+			require.False(t, service.ValidateFunctionCallOutputContextBytes(got).HasFunctionCallOutputMissingCallID)
+			for i := 0; i < 3; i++ {
+				item := gjson.GetBytes(got, "input").Array()[i]
+				require.Equal(t, "message", item.Get("type").String())
+				require.Equal(t, "user", item.Get("role").String())
+			}
+			require.Equal(t, "<external_browser_tabs>\n"+codexBrowserTabsAmbientContext+"\n</external_browser_tabs>", gjson.GetBytes(got, "input.0.content.0.text").String())
+			if withHistory {
+				require.JSONEq(t, gjson.GetBytes(body, "input.3").Raw, gjson.GetBytes(got, "input.3").Raw)
+				require.JSONEq(t, gjson.GetBytes(body, "input.4").Raw, gjson.GetBytes(got, "input.4").Raw)
+			}
+			again, changed := normalizeCodexPageContext(got)
+			require.False(t, changed)
+			require.Equal(t, got, again)
+		})
+	}
+}
+
+func TestNormalizeCodexPageContextAmbientBrowserTabsStandalone(t *testing.T) {
+	for _, output := range []string{codexBrowserTabsAmbientContext, strings.ReplaceAll(codexBrowserTabsAmbientContext, "\n", "\r\n")} {
+		body := pageContextRequest(t, pageContextItem("browser_tabs", output))
+		got, changed := normalizeCodexPageContext(body)
+		require.True(t, changed)
+		require.Equal(t, "message", gjson.GetBytes(got, "input.0.type").String())
+		require.Equal(t, "<external_browser_tabs>\n"+output+"\n</external_browser_tabs>", gjson.GetBytes(got, "input.0.content.0.text").String())
+	}
+}
+
+func TestNormalizeCodexPageContextAmbientBrowserTabsRejectsOtherOutputs(t *testing.T) {
+	for _, tc := range []struct {
+		name, key string
+		value     any
+	}{
+		{"real call", "call_id", "call_real"},
+		{"null call id", "call_id", nil},
+		{"non string call id", "call_id", 1},
+		{"other namespace", "namespace", "functions"},
+		{"other name", "name", "list_tabs"},
+		{"other type", "type", "custom_tool_call_output"},
+		{"plain tool result", "output", "two browser tabs"},
+		{"wrong source", "output", strings.ReplaceAll(codexBrowserTabsAmbientContext, "ambient-ui-state", "tool-result")},
+		{"missing disclaimer", "output", "<in-app-browser-context source=\"ambient-ui-state\">\n# In app browser:\nhello\n</in-app-browser-context>"},
+		{"unclosed envelope", "output", strings.ReplaceAll(codexBrowserTabsAmbientContext, "</in-app-browser-context>", "")},
+		{"extra content", "output", codexBrowserTabsAmbientContext + "unrelated output"},
+		{"multiple envelopes", "output", codexBrowserTabsAmbientContext + codexBrowserTabsAmbientContext},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := pageContextItem("browser_tabs", codexBrowserTabsAmbientContext)
+			item[tc.key] = tc.value
+			body := pageContextRequest(t, item)
+			got, changed := normalizeCodexPageContext(body)
+			require.False(t, changed)
+			require.Equal(t, body, got)
+		})
 	}
 }
