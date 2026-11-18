@@ -2,7 +2,7 @@
 
 实施分支：`main-wayvia`。方案来源：同工作区 `wayvia.dev/docs/IPv6账号独立出口接入方案.md`。本文件描述代码交付及检查边界，生产网络验收须单独执行。
 
-当前源码版本：`0.2.22-wayvia`，以 `backend/cmd/server/VERSION` 为准，遵循根目录 `AGENTS.md` 的 `<上游版本>-wayvia` 规则。界面统一补一个 `v`；下文历史发布标识保留当时原值。
+当前源码版本：`0.2.23-wayvia`，以 `backend/cmd/server/VERSION` 为准，遵循根目录 `AGENTS.md` 的 `<上游版本>-wayvia` 规则。界面统一补一个 `v`；下文历史发布标识保留当时原值。本轮仅本地合并，见 [v0.2.23 合并记录](../upstream-merge-v0.2.23.md)，不代表正式环境已升级。
 
 ## 实现范围
 
