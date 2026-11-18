@@ -53,6 +53,10 @@ func (s *managerTestStore) SaveResult(_ context.Context, _ *service.Account, rev
 
 func (*managerTestStore) Due(context.Context, time.Time, int) ([]int64, error) { return nil, nil }
 
+func (*managerTestStore) AlertWallets(context.Context, string, *int64) ([]alertWallet, error) {
+	return nil, nil
+}
+
 type managerTestHTTP struct {
 	calls atomic.Int32
 	do    func(*http.Request) (*http.Response, error)

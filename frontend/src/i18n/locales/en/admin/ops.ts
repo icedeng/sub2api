@@ -518,6 +518,7 @@ export default {
           groupRateLimitRatio: 'Group Rate Limit Ratio (%)',
           accountRateLimitedCount: 'Rate-limited Accounts',
           accountErrorCount: 'Error Accounts (excluding temporarily unschedulable)',
+          upstreamLowBalanceCount: 'Upstream Low Balance Accounts',
           accountErrorRatio: 'Error Account Ratio (%)',
           accountTempUnscheduledCount: 'Temporarily Unschedulable Accounts',
           overloadAccountCount: 'Overloaded Accounts'
@@ -536,6 +537,7 @@ export default {
           groupRateLimitRatio: 'Rate-limited account ratio in the selected group (0-100, requires group_id).',
           accountRateLimitedCount: 'Number of rate-limited accounts within the window.',
           accountErrorCount: 'Number of error accounts within the window (excluding temporarily unschedulable).',
+          upstreamLowBalanceCount: 'Counts accounts whose latest valid wallet balance is below their configured threshold.',
           accountErrorRatio: 'Error account ratio within the window (0-100).',
           accountTempUnscheduledCount: 'Number of accounts currently temporarily unschedulable (e.g. proxy/credential failure auto-eviction).',
           overloadAccountCount: 'Number of overloaded accounts within the window.'
@@ -561,6 +563,7 @@ export default {
           groupPlaceholder: 'Select a group',
           allGroups: 'All groups',
           threshold: 'Threshold',
+          upstreamLowBalanceCount: 'Minimum Account Count',
           severity: 'Severity',
           window: 'Window (minutes)',
           sustained: 'Sustained (samples)',
@@ -569,6 +572,7 @@ export default {
           notifyEmail: 'Send email notifications'
         },
         validation: {
+          upstreamLowBalanceCount: 'Account count must be a positive integer.',
           title: 'Please fix the following issues',
           invalid: 'Invalid rule',
           nameRequired: 'Name is required',

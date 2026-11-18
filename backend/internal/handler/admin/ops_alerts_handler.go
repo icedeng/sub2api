@@ -28,6 +28,7 @@ var validOpsAlertMetricTypes = []string{
 	"group_rate_limit_ratio",
 	"account_rate_limited_count",
 	"account_error_count",
+	service.OpsAlertMetricUpstreamLowBalanceCount,
 	"account_error_ratio",
 	"account_temp_unscheduled_count",
 	"overload_account_count",
@@ -144,6 +145,10 @@ func validateOpsAlertRulePayload(raw map[string]json.RawMessage) (*opsAlertRuleV
 	}
 	if math.IsNaN(threshold) || math.IsInf(threshold, 0) {
 		return nil, fmt.Errorf("threshold must be a finite number")
+	}
+	if metricType == service.OpsAlertMetricUpstreamLowBalanceCount &&
+		(operator != ">=" || threshold < 1 || math.Trunc(threshold) != threshold) {
+		return nil, fmt.Errorf("upstream low balance rule requires operator >= and a positive integer account count")
 	}
 	if isPercentOrRateMetric(metricType) {
 		if threshold < 0 || threshold > 100 {

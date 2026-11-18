@@ -11,7 +11,7 @@
 - 钱包、Key 额度、订阅周期独立表达；缺失、真实零、不限额独立表达。金额、Token 数、原始额度均用十进制字符串传输，不套用本站充值汇率。
 - 列表紧凑展示，详情读取已有快照；当前页每 60 秒批量读取本地状态，隐藏列时停止读取。打开详情不访问上游。
 - 账户编辑中的余额配置独立保存，不混入账号整体更新载荷；关闭账号编辑窗口不会撤销已经保存的余额设置。查询使用已保存的账号地址、Key、代理。
-- 不含通用自定义查询、旧版账单、告警推送、趋势图、余额汇总或自动停用。未实现的查询类型不显示入口。
+- 支持通过运维预警规则发送低余额邮件。不含通用自定义查询、旧版账单、Webhook、趋势图、余额汇总或自动停用。
 
 未引用或整仓移植外部二开项目代码，未新增第三方依赖。没有修改模型请求计费、账号倍率、可调度状态、账号导入导出格式或固定 IPv6 出口配置。
 
@@ -38,6 +38,7 @@
 | `backend/internal/wayviabalance/coordination.go` | Redis 账号锁、站点串行名额、共享冷却、公开元数据缓存 |
 | `backend/internal/wayviabalance/parse.go`、`url.go` | 严格字段语义、十进制处理、HTTPS 与子路径构造 |
 | `backend/internal/wayviabalance/store.go`、`migrate.go`、`migrations/` | 模块附属表、原子写入与独立迁移 |
+| `backend/internal/wayviabalance/alerts.go` | 按平台或分组只读采样余额快照，检查账号身份和快照时效，用十进制比较各账号阈值 |
 | `backend/internal/wayviabalance/*_test.go` | 解析、传输隔离、退避、过载、取消、退出、配置/结果 CAS 和可选 PostgreSQL 集成回归 |
 | `backend/internal/server/routes/wayvia_balance.go`、`wayvia_balance_test.go` | 独立管理路由及认证/受限密钥/step-up 回归 |
 | `frontend/src/api/admin/wayvia-balance.ts` | 独立 API 契约、金额格式化、字符串阈值比较、错误文案白名单 |
@@ -58,6 +59,8 @@
 | `backend/internal/server/http.go` / `ProvideRouter` | 新增 Manager 参数，传入 SetupRouter | 随官方 Provider 签名演进，仅保留这一条依赖传递 |
 | `backend/internal/server/router.go` / `SetupRouter`、`registerRoutes` | 可选 Manager 参数及独立路由注册 | 保留 `/api/v1/admin/wayvia-balance`；旧调用方可不传 Manager；不能漏挂管理中间件 |
 | `backend/internal/server/middleware/audit_log.go` / `auditSensitiveReads` | 添加两条缓存 GET 的敏感读取审计 | 保留两条动作 `admin.upstream_balance.read`；写请求继续走原审计脱敏，`query_token` 命中既有 token 敏感键规则 |
+| `backend/internal/service/ops_alert_evaluator_service.go`、`ops_upstream_balance_alert.go`、`wire.go` | 注入余额采样器并接入现有运维事件和邮件 | 保留 `OpsUpstreamBalanceReader` 的 Wire 绑定、未知状态处理和同一规则的告警去重 |
+| `backend/internal/handler/admin/ops_alerts_handler.go`、前端 `OpsAlertRulesCard.vue`、`api/admin/ops.ts` 和中英文 `admin/ops.ts` | 注册 `upstream_low_balance_account_count` | 保留正整数账号数阈值、`>=` 比较和对应词条 |
 | `frontend/src/views/admin/AccountsView.vue` | 添加上游余额列、批读 composable、单元格与更新事件 | 检查表格插槽、可见列设置及 Account 类型是否变动；不要把上游请求放进每行渲染 |
 | `frontend/src/components/account/EditAccountModal.vue` | 挂载独立设置组件，转发 `balanceUpdated` | 保留独立保存；不能把密文或令牌塞进主账号 payload |
 | `frontend/src/i18n/locales/{zh,en}/admin/accounts.ts` | 各增加一次 import 和 `upstreamBalance` 属性 | 保留词条命名空间，避免复制到官方通用词条中 |
@@ -135,3 +138,9 @@
 ## 8. 2026-11-16 服务器发布
 
 2026-11-16 11:38:48（Asia/Shanghai）完成发布核验，编号 `20261116T032413Z`，运行镜像 `wayvia/sub2api@sha256:40597f3be578a50bdf81ef3fd25b96ad004ab45508f9d60d34d9152ba725e3b7`，构建标识 `b893f1738-wayvia-59e400f006b6`。独立余额迁移已执行，默认监控关闭；既有官方/出口迁移、账号与固定地址保持。切换时品牌配置保持，切换后独立更新的 WayVia 条款已按其记录复核并保留。四容器健康，本机/公网健康、静态资源哈希和未认证接口拒绝检查通过。备份 `/root/wayvia-deploy-20261116T032413Z`。本次未执行真实上游余额查询、模型请求、主动 Token 刷新或浏览器视觉验收；详细证据见同工作区 `wayvia.dev/releases/20261116T032413Z/DEPLOYMENT.md`。
+
+## 9. 运维低余额邮件
+
+在「运维监控 → 预警规则」选择「上游余额不足账号数」，最少账号数默认 1，可限定分组。规则复用每个账号的低余额提示阈值及余额快照，按其钱包显示单位比较。规则的持续时间、静默、冷却与收件人沿用运维告警配置。邮件事件记录已确认不足的账号编号，同一规则的告警保持活跃期间只触发一次。
+
+钱包金额缺失、仅有 Key 额度或原始额度、查询失败、快照过期或账号身份发生变化时，钱包状态按未知处理。只有未知值足以改变判定时才暂停判断。关闭监控或移除阈值会将账号移出规则范围。采样仅读取现有模块表，无需新迁移。

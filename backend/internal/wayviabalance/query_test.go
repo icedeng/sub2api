@@ -271,6 +271,9 @@ type queryResultStore struct{ initial, saved *record }
 
 func (s *queryResultStore) Load(context.Context, int64) (*record, error)         { return s.initial, nil }
 func (s *queryResultStore) Due(context.Context, time.Time, int) ([]int64, error) { return nil, nil }
+func (s *queryResultStore) AlertWallets(context.Context, string, *int64) ([]alertWallet, error) {
+	return nil, nil
+}
 func (s *queryResultStore) SaveConfig(context.Context, *service.Account, Config, int64, string, string, string, bool) (*record, error) {
 	return nil, ErrConfigChanged
 }

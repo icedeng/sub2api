@@ -31,6 +31,7 @@ type balanceStore interface {
 	SaveConfig(context.Context, *service.Account, Config, int64, string, string, string, bool) (*record, error)
 	SaveResult(context.Context, *service.Account, int64, string, *record) error
 	Due(context.Context, time.Time, int) ([]int64, error)
+	AlertWallets(context.Context, string, *int64) ([]alertWallet, error)
 }
 
 // Manager 的缓存、生命周期、并发与财务调度独立，仅依赖宿主只读账号接口和 HTTP 传输。

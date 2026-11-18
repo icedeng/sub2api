@@ -518,6 +518,7 @@ export default {
           groupRateLimitRatio: '分组限流比例 (%)',
           accountRateLimitedCount: '限流账号数',
           accountErrorCount: '错误账号数（不含临时不可调度）',
+          upstreamLowBalanceCount: '上游余额不足账号数',
           accountErrorRatio: '错误账号比例 (%)',
           accountTempUnscheduledCount: '临时不可调度账号数',
           overloadAccountCount: '过载账号数'
@@ -536,6 +537,7 @@ export default {
           groupRateLimitRatio: '指定分组中账号被限流的比例（0~100，需要 group_id 过滤）。',
           accountRateLimitedCount: '统计窗口内被限流的账号数量。',
           accountErrorCount: '统计窗口内产生错误的账号数量（不含临时不可调度）。',
+          upstreamLowBalanceCount: '按账号的低余额提示阈值统计，使用最近有效的钱包余额。',
           accountErrorRatio: '统计窗口内错误账号占比（0~100）。',
           accountTempUnscheduledCount: '当前处于临时不可调度状态的账号数量（如代理/凭据故障被自动摘除）。',
           overloadAccountCount: '统计窗口内过载账号数量。'
@@ -561,6 +563,7 @@ export default {
           groupPlaceholder: '请选择分组',
           allGroups: '全部分组',
           threshold: '阈值',
+          upstreamLowBalanceCount: '触发所需的最少账号数',
           severity: '级别',
           window: '统计窗口（分钟）',
           sustained: '连续样本数（每分钟）',
@@ -569,6 +572,7 @@ export default {
           notifyEmail: '发送邮件通知'
         },
         validation: {
+          upstreamLowBalanceCount: '账号数必须为正整数。',
           title: '请先修正以下问题',
           invalid: '规则不合法',
           nameRequired: '名称不能为空',

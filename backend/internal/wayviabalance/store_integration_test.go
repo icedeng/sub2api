@@ -64,6 +64,7 @@ func postgresBalanceStore(t *testing.T) (*store, *service.Account) {
 			proxy_id bigint REFERENCES proxies(id), status text,
 			parent_account_id bigint, deleted_at timestamptz
 		);
+		CREATE TABLE account_groups (account_id bigint, group_id bigint);
 		INSERT INTO proxies (id, protocol, host, port, password, status)
 		VALUES (4, 'http', 'proxy.test', 8080, 'current-secret', 'active');
 	`)
@@ -105,6 +106,7 @@ func TestStorePostgresIntegration(t *testing.T) {
 
 	cfg := defaultConfig()
 	cfg.Enabled = true
+	cfg.LowBalanceThreshold = "13"
 	r, err := s.SaveConfig(ctx, a, cfg, 0, "identity", "encrypted-secret", "identity", true)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), r.Revision)
@@ -114,9 +116,31 @@ func TestStorePostgresIntegration(t *testing.T) {
 	firstAttempt := time.Now().UTC().Truncate(time.Microsecond)
 	next := firstAttempt.Add(5 * time.Minute)
 	first := &record{LastAttemptAt: &firstAttempt, NextRetryAt: &next,
-		Snapshot:         &Snapshot{Provider: "sub2api", Wallet: &Metric{Amount: "12.34", Unit: "USD"}},
+		Snapshot: &Snapshot{Provider: "sub2api", Wallet: &Metric{Amount: "12.34", Unit: "USD"},
+			ReceivedAt: firstAttempt, FreshUntil: next},
 		DetectedProvider: "sub2api", DetectedPath: "/v1/usage"}
 	require.NoError(t, s.SaveResult(ctx, a, 1, "identity", first))
+
+	groupID := int64(9)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO account_groups VALUES ($1, $2)`, a.ID, groupID)
+	require.NoError(t, err)
+	wallets, err := s.AlertWallets(ctx, a.Platform, &groupID)
+	require.NoError(t, err)
+	require.Len(t, wallets, 1)
+	wallet := wallets[0]
+	wallet.identity = accountIdentity(a)
+	low, known := wallet.belowThreshold(a, firstAttempt)
+	require.True(t, known)
+	require.True(t, low)
+	_, known = wallet.belowThreshold(a, next)
+	require.False(t, known)
+	wallet.errorCode = "request_failed"
+	_, known = wallet.belowThreshold(a, firstAttempt)
+	require.False(t, known)
+	otherGroup := groupID + 1
+	wallets, err = s.AlertWallets(ctx, a.Platform, &otherGroup)
+	require.NoError(t, err)
+	require.Empty(t, wallets)
 
 	cfg.IntervalMinutes = 10
 	r, err = s.SaveConfig(ctx, a, cfg, 1, "identity", "encrypted-secret", "identity", false)

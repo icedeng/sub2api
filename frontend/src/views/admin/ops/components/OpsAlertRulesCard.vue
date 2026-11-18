@@ -47,6 +47,8 @@ const showEditor = ref(false)
 const saving = ref(false)
 const editingId = ref<number | null>(null)
 const draft = ref<AlertRule | null>(null)
+const upstreamLowBalanceMetric = 'upstream_low_balance_account_count'
+const isUpstreamLowBalanceSelected = computed(() => draft.value?.metric_type === upstreamLowBalanceMetric)
 
 type MetricGroup = 'system' | 'group' | 'account'
 
@@ -201,6 +203,14 @@ const metricDefinitions = computed(() => {
 
     // Account-level metrics
     {
+      type: upstreamLowBalanceMetric,
+      group: 'account',
+      label: t('admin.ops.alertRules.metrics.upstreamLowBalanceCount'),
+      description: t('admin.ops.alertRules.metricDescriptions.upstreamLowBalanceCount'),
+      recommendedOperator: '>=',
+      recommendedThreshold: 1
+    },
+    {
       type: 'account_rate_limited_count',
       group: 'account',
       label: t('admin.ops.alertRules.metrics.accountRateLimitedCount'),
@@ -274,6 +284,18 @@ const operatorOptions = computed(() => {
   return ops.map((o) => ({ value: o, label: o }))
 })
 
+function selectMetric(value: MetricType) {
+  const rule = draft.value
+  if (!rule || value === rule.metric_type) return
+  const wasUpstreamLowBalance = isUpstreamLowBalanceSelected.value
+  rule.metric_type = value
+  if (wasUpstreamLowBalance || isUpstreamLowBalanceSelected.value) {
+    rule.operator = selectedMetricDefinition.value?.recommendedOperator ?? '>'
+    rule.threshold = selectedMetricDefinition.value?.recommendedThreshold ?? 1
+    rule.window_minutes = 1
+  }
+}
+
 const severityOptions = computed(() => {
   const sev: OpsSeverity[] = ['P0', 'P1', 'P2', 'P3']
   return sev.map((s) => ({ value: s, label: s }))
@@ -324,6 +346,8 @@ const editorValidation = computed(() => {
   if (!r.operator) errors.push(t('admin.ops.alertRules.validation.operatorRequired'))
   if (!(typeof r.threshold === 'number' && Number.isFinite(r.threshold)))
     errors.push(t('admin.ops.alertRules.validation.thresholdRequired'))
+  if (isUpstreamLowBalanceSelected.value && (!Number.isInteger(r.threshold) || r.threshold < 1))
+    errors.push(t('admin.ops.alertRules.validation.upstreamLowBalanceCount'))
   if (!(typeof r.window_minutes === 'number' && Number.isFinite(r.window_minutes) && [1, 5, 60].includes(r.window_minutes))) {
     errors.push(t('admin.ops.alertRules.validation.windowRange'))
   }
@@ -437,7 +461,7 @@ function cancelDelete() {
               <span class="shrink-0 text-xs font-bold text-gray-700 dark:text-gray-200">{{ row.severity }}</span>
             </div>
             <div class="text-xs text-gray-700 dark:text-gray-200">
-              <span class="font-mono">{{ row.metric_type }}</span>
+              <span class="font-mono">{{ row.metric_type === upstreamLowBalanceMetric ? t('admin.ops.alertRules.metrics.upstreamLowBalanceCount') : row.metric_type }}</span>
               <span class="mx-1 text-gray-400">{{ row.operator }}</span>
               <span class="font-mono">{{ row.threshold }}</span>
             </div>
@@ -487,7 +511,7 @@ function cancelDelete() {
                 </div>
               </td>
               <td class="whitespace-nowrap px-4 py-3 text-xs text-gray-700 dark:text-gray-200">
-                <span class="font-mono">{{ row.metric_type }}</span>
+                <span class="font-mono">{{ row.metric_type === upstreamLowBalanceMetric ? t('admin.ops.alertRules.metrics.upstreamLowBalanceCount') : row.metric_type }}</span>
                 <span class="mx-1 text-gray-400">{{ row.operator }}</span>
                 <span class="font-mono">{{ row.threshold }}</span>
               </td>
@@ -534,7 +558,7 @@ function cancelDelete() {
 
           <div>
             <label class="input-label">{{ t('admin.ops.alertRules.form.metric') }}</label>
-            <Select v-model="draft!.metric_type" :options="metricOptions" />
+            <Select :model-value="draft!.metric_type" :options="metricOptions" @update:model-value="selectMetric($event as MetricType)" />
             <div v-if="selectedMetricDefinition" class="mt-1 space-y-0.5 text-xs text-gray-500 dark:text-gray-400">
               <p>{{ selectedMetricDefinition.description }}</p>
               <p>
@@ -551,7 +575,7 @@ function cancelDelete() {
 
           <div>
             <label class="input-label">{{ t('admin.ops.alertRules.form.operator') }}</label>
-            <Select v-model="draft!.operator" :options="operatorOptions" />
+            <Select v-model="draft!.operator" :options="operatorOptions" :disabled="isUpstreamLowBalanceSelected" />
           </div>
 
           <div class="md:col-span-2">
@@ -572,8 +596,8 @@ function cancelDelete() {
           </div>
 
           <div>
-            <label class="input-label">{{ t('admin.ops.alertRules.form.threshold') }}</label>
-            <input v-model.number="draft!.threshold" class="input" type="number" />
+            <label class="input-label">{{ t(isUpstreamLowBalanceSelected ? 'admin.ops.alertRules.form.upstreamLowBalanceCount' : 'admin.ops.alertRules.form.threshold') }}</label>
+            <input v-model.number="draft!.threshold" class="input" type="number" :min="isUpstreamLowBalanceSelected ? 1 : undefined" />
           </div>
 
           <div>
@@ -581,7 +605,7 @@ function cancelDelete() {
             <Select v-model="draft!.severity" :options="severityOptions" />
           </div>
 
-          <div>
+          <div v-if="!isUpstreamLowBalanceSelected">
             <label class="input-label">{{ t('admin.ops.alertRules.form.window') }}</label>
             <Select v-model="draft!.window_minutes" :options="windowOptions" />
           </div>

@@ -694,6 +694,7 @@ export type MetricType =
   | 'group_rate_limit_ratio'
   | 'account_rate_limited_count'
   | 'account_error_count'
+  | 'upstream_low_balance_account_count'
   | 'account_error_ratio'
   | 'account_temp_unscheduled_count'
   | 'overload_account_count'

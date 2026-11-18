@@ -32,10 +32,11 @@ return 0
 `)
 
 type OpsAlertEvaluatorService struct {
-	opsService   *OpsService
-	opsRepo      OpsRepository
-	emailService *EmailService
-	proxyRepo    ProxyRepository
+	opsService      *OpsService
+	opsRepo         OpsRepository
+	emailService    *EmailService
+	proxyRepo       ProxyRepository
+	upstreamBalance OpsUpstreamBalanceReader
 
 	redisClient *redis.Client
 	cfg         *config.Config
@@ -69,17 +70,19 @@ func NewOpsAlertEvaluatorService(
 	redisClient *redis.Client,
 	cfg *config.Config,
 	proxyRepo ProxyRepository,
+	upstreamBalance OpsUpstreamBalanceReader,
 ) *OpsAlertEvaluatorService {
 	return &OpsAlertEvaluatorService{
-		opsService:   opsService,
-		opsRepo:      opsRepo,
-		emailService: emailService,
-		proxyRepo:    proxyRepo,
-		redisClient:  redisClient,
-		cfg:          cfg,
-		instanceID:   uuid.NewString(),
-		ruleStates:   map[int64]*opsAlertRuleState{},
-		emailLimiter: newSlidingWindowLimiter(0, time.Hour),
+		opsService:      opsService,
+		opsRepo:         opsRepo,
+		emailService:    emailService,
+		proxyRepo:       proxyRepo,
+		upstreamBalance: upstreamBalance,
+		redisClient:     redisClient,
+		cfg:             cfg,
+		instanceID:      uuid.NewString(),
+		ruleStates:      map[int64]*opsAlertRuleState{},
+		emailLimiter:    newSlidingWindowLimiter(0, time.Hour),
 	}
 }
 
@@ -226,7 +229,16 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 		windowStart := safeEnd.Add(-time.Duration(windowMinutes) * time.Minute)
 		windowEnd := safeEnd
 
-		metricValue, ok := s.computeRuleMetric(ctx, rule, systemMetrics, windowStart, windowEnd, scopePlatform, scopeGroupID)
+		var metricValue float64
+		var ok bool
+		var balanceSample OpsUpstreamBalanceSample
+		isBalanceRule := rule.MetricType == OpsAlertMetricUpstreamLowBalanceCount
+		if isBalanceRule {
+			balanceSample, ok = s.readUpstreamBalanceMetric(ctx, rule, scopePlatform, scopeGroupID, now)
+			metricValue = float64(len(balanceSample.LowAccountIDs))
+		} else {
+			metricValue, ok = s.computeRuleMetric(ctx, rule, systemMetrics, windowStart, windowEnd, scopePlatform, scopeGroupID)
+		}
 		if !ok {
 			s.resetRuleState(rule.ID, now)
 			continue
@@ -243,6 +255,10 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 			continue
 		}
 
+		// 新指标采样不确定时会重置持续计数，后续仍不足不应把活跃事件标记为恢复。
+		if isBalanceRule && breachedNow && consecutive < required {
+			continue
+		}
 		if breachedNow && consecutive >= required {
 			if activeEvent != nil {
 				continue
@@ -282,6 +298,9 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 				Dimensions:     buildOpsAlertDimensions(scopePlatform, scopeGroupID),
 				FiredAt:        now,
 				CreatedAt:      now,
+			}
+			if isBalanceRule {
+				firedEvent.Description = describeOpsUpstreamBalance(balanceSample)
 			}
 
 			created, err := s.opsRepo.CreateAlertEvent(ctx, firedEvent)
