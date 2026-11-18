@@ -448,6 +448,21 @@ func TestBuildCodexModelsManifestUsesGPT6AstraInstructions(t *testing.T) {
 	))
 }
 
+func TestBuildCodexModelsManifestRemovesOfficialAccessProgramsFromGPT62(t *testing.T) {
+	t.Parallel()
+
+	body, err := BuildCodexModelsManifest([]string{"gpt-6.2-sol", "gpt-6.2-astra"})
+	require.NoError(t, err)
+
+	models := decodeCodexManifestModels(t, body)
+	require.Len(t, models, 2)
+	for _, model := range models {
+		require.NotContains(t, model, "available_access_programs")
+		require.Equal(t, "0.166.0", model["minimal_client_version"])
+		require.Equal(t, true, model["prefer_websockets"])
+	}
+}
+
 func effortsFromConfiguredCodexLevels(levels []configuredCodexReasoningLevel) []string {
 	efforts := make([]string, 0, len(levels))
 	for _, level := range levels {
