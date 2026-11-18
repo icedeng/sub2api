@@ -2723,9 +2723,6 @@ func (d configuredCodexModelDescriptor) MarshalJSON() ([]byte, error) {
 	if err := json.Unmarshal(d.officialMetadata, &official); err != nil {
 		return nil, err
 	}
-	// OpenAI 的内部访问计划只适用于官方账号。配置目录面向自定义
-	// Provider，透传该字段会导致 Codex 客户端隐藏管理员已开放的模型。
-	delete(official, "available_access_programs")
 	for key, value := range official {
 		if _, exists := fields[key]; !exists {
 			fields[key] = value
