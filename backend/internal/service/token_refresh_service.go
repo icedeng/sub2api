@@ -895,6 +895,7 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 			}
 		} else {
 			// 降级：直接调用 refresher（兼容旧路径）
+			attemptedAccount := snapshotOAuthRefreshAccount(account)
 			releaseRate := func() {}
 			if acquireRate != nil {
 				releaseRate, err = acquireRate(attemptCtx)
@@ -906,19 +907,22 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 				releaseRate()
 			}
 			attemptTimedOut := errors.Is(attemptCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
-			if err == nil && newCredentials != nil && !attemptTimedOut {
-				if wayviaegress.ControlledRefresh(account.ID) {
-					credentialsPersisted = true
-					newCredentials = nil
-				} else {
-					newCredentials["_token_version"] = time.Now().UnixMilli()
-				}
-				if saveErr := func() error {
-					if credentialsPersisted {
-						return nil
+			if err == nil && newCredentials != nil && wayviaegress.ControlledRefresh(account.ID) {
+				// 固定出口刷新已在 owner 锁内提交凭据，避免轮换后重复写入。
+				credentialsPersisted = true
+			} else if err == nil && hasOpenAIRefreshCredentials(attemptedAccount, newCredentials) {
+				var durableAccount *Account
+				durableAccount, credentialsPersisted, err = persistOpenAIRefreshCredentials(attemptCtx, s.accountRepo, attemptedAccount, newCredentials)
+				if err == nil {
+					account = durableAccount
+					if !credentialsPersisted {
+						err = errRefreshSkipped
+						shortCircuit = true
 					}
-					return persistAccountCredentials(attemptCtx, s.accountRepo, account, newCredentials)
-				}(); saveErr != nil {
+				}
+			} else if err == nil && newCredentials != nil && !attemptTimedOut {
+				newCredentials["_token_version"] = time.Now().UnixMilli()
+				if saveErr := persistAccountCredentials(attemptCtx, s.accountRepo, account, newCredentials); saveErr != nil {
 					err = fmt.Errorf("failed to save credentials: %w", saveErr)
 				} else {
 					credentialsPersisted = true
@@ -929,7 +933,7 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 		cancelAttempt()
 		releaseAttempt()
 		persistedAfterAttemptDeadline := attemptTimedOut && credentialsPersisted && err == nil
-		if attemptTimedOut && !persistedAfterAttemptDeadline && !isProviderScopedTerminalRefreshError(err) {
+		if attemptTimedOut && !shortCircuit && !persistedAfterAttemptDeadline && !isProviderScopedTerminalRefreshError(err) {
 			cause := err
 			if cause == nil {
 				cause = context.DeadlineExceeded
