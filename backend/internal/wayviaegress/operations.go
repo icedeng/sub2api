@@ -161,7 +161,8 @@ func (m *Manager) Change(ctx context.Context, c Change, actor string) (Operation
 		m.mu.Unlock()
 		return Operation{}, Conflict("已退役owner只能恢复绑定")
 	}
-	if p.State == "credential_uncertain" && c.Kind != "restore-binding" {
+	// 退役只停流并保留地址归属，不使用 OAuth 凭据。
+	if p.State == "credential_uncertain" && c.Kind != "restore-binding" && c.Kind != "retire" {
 		m.mu.Unlock()
 		return Operation{}, Error("EGRESS_CREDENTIAL_UNCERTAIN", "先完成账号关联重新授权")
 	}
@@ -389,7 +390,7 @@ func (m *Manager) execute(mark pending) {
 			}
 		}
 		m.mu.Unlock()
-		if p.State == "credential_uncertain" && mark.Operation.Target != "paused" && mark.Operation.Kind != "restore-binding" {
+		if p.State == "credential_uncertain" && mark.Operation.Target != "paused" && mark.Operation.Kind != "restore-binding" && mark.Operation.Kind != "retire" {
 			runErr = Error("EGRESS_CREDENTIAL_UNCERTAIN", "刷新结果待确认")
 			break
 		}
