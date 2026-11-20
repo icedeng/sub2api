@@ -115,6 +115,24 @@ func TestFetchOpenAIAccountModelsPreservesEmptyCatalog(t *testing.T) {
 	require.Empty(t, models, "an empty upstream catalog must not become a static model list")
 }
 
+func TestFetchOpenAIAccountModelsAPIKeyIncludesConfiguredModelMissingFromCatalog(t *testing.T) {
+	gateway := newCodexModelsAPIKeyTestService(&codexModelsHTTPUpstreamStub{do: func(_ *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+		return ordinaryModelsUpstreamResponse(`{"data":[{"id":"gpt-6.1-sol","display_name":"Provider Sol"},{"id":"unconfigured"}]}`), nil
+	}})
+	svc := &AccountTestService{openaiGatewayService: gateway}
+	account := newCodexModelsAPIKeyTestAccount("https://models.example/v1")
+	account.Credentials["model_mapping"] = map[string]any{
+		"gpt-6.1-sol": "gpt-6.1-sol",
+		"gpt-6.2-sol": "gpt-6.2-sol",
+		"custom-*":    "gpt-6.2-sol",
+	}
+	models, err := svc.FetchOpenAIAccountModels(context.Background(), account)
+	require.NoError(t, err)
+	require.Equal(t, []string{"gpt-6.1-sol", "gpt-6.2-sol"}, pickerModelIDs(models))
+	require.Equal(t, "Provider Sol", models[0].DisplayName)
+	require.Equal(t, "GPT-6.2 Sol", models[1].DisplayName)
+}
+
 func TestFetchOpenAIAccountModelsOAuthLabelsLocalImageModelsLikeUpstream(t *testing.T) {
 	newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"gpt-5.6-sol"}]}`)
 	svc := &AccountTestService{openaiGatewayService: &OpenAIGatewayService{}}

@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -220,6 +221,25 @@ func (s *AccountTestService) FetchOpenAIAccountModels(ctx context.Context, accou
 		}
 		if strings.TrimSpace(model.Type) == "" {
 			model.Type = "model"
+		}
+	}
+	// API key providers may serve a model before listing it in /models. Keep
+	// exact account mappings selectable here so admins can test them directly.
+	if account != nil && account.IsOpenAI() && account.Type == AccountTypeAPIKey && !account.IsOpenAIPassthroughEnabled() {
+		seen := make(map[string]bool, len(payload.Data))
+		for _, model := range payload.Data {
+			seen[model.ID] = true
+		}
+		var configuredIDs []string
+		for id, target := range account.GetModelMapping() {
+			if id == "" || strings.TrimSpace(id) != id || strings.Contains(id, "*") || strings.TrimSpace(target) == "" || seen[id] {
+				continue
+			}
+			configuredIDs = append(configuredIDs, id)
+		}
+		sort.Strings(configuredIDs)
+		for _, id := range configuredIDs {
+			payload.Data = append(payload.Data, openai.Model{ID: id, Object: "model", Type: "model", DisplayName: openaiCodexDisplayName(id)})
 		}
 	}
 	// Codex discovery lists Responses drivers, not image_generation tool models.
