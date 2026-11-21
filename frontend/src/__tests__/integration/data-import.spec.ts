@@ -175,6 +175,27 @@ describe('ImportDataModal', () => {
     expect(showSuccess).toHaveBeenCalledWith('admin.accounts.dataImportSuccess')
   })
 
+  it('接受原生 auth.json，部分更新成功后刷新账号列表', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 0, proxy_reused: 0, proxy_failed: 0,
+      account_created: 0, account_updated: 1, account_failed: 1
+    })
+    const wrapper = mountModal()
+    const input = wrapper.find('input[type="file"]')
+    const auth = { tokens: { access_token: 'fixture-at', refresh_token: 'fixture-rt' } }
+    setInputFiles(input.element, [makeJsonFile('auth.json', JSON.stringify(auth))])
+    await input.trigger('change')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    expect(adminAPI.accounts.importData).toHaveBeenCalledWith({
+      data: expect.objectContaining({ auth_files: [{ name: 'auth.json', auth }] }),
+      skip_default_group_bind: true
+    })
+    await wrapper.findAll('button.btn-secondary')[1]!.trigger('click')
+    expect(wrapper.emitted('imported')).toHaveLength(1)
+  })
+
   it('部分成功时关闭弹窗仍通知父组件刷新', async () => {
     const { adminAPI } = await import('@/api/admin')
     vi.mocked(adminAPI.accounts.importData).mockResolvedValue({

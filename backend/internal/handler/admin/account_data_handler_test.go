@@ -317,3 +317,24 @@ func TestImportDataReusesProxyAndSkipsDefaultGroup(t *testing.T) {
 	require.Len(t, adminSvc.createdAccounts, 1)
 	require.True(t, adminSvc.createdAccounts[0].SkipDefaultGroupBind)
 }
+
+func TestImportDataAcceptsNativeAuthFile(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	bundle := DataPayload{Proxies: []DataProxy{}, Accounts: []DataAccount{}, AuthFiles: []CodexAuthFile{
+		{Name: "auth.json", Auth: map[string]any{"auth_mode": "chatgpt", "tokens": map[string]any{"access_token": "fixture-at", "refresh_token": "fixture-rt", "account_id": "workspace"}}},
+	}}
+	body, err := json.Marshal(DataImportRequest{Data: bundle})
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, adminSvc.createdAccounts, 1)
+	created := adminSvc.createdAccounts[0]
+	require.Equal(t, "workspace", created.Credentials["chatgpt_account_id"])
+	require.Equal(t, "fixture-at", created.Credentials["access_token"])
+	require.Equal(t, "fixture-rt", created.Credentials["refresh_token"])
+	require.NotContains(t, rec.Body.String(), "fixture-at")
+	require.NotContains(t, rec.Body.String(), "fixture-rt")
+}

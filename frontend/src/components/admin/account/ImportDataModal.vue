@@ -122,7 +122,7 @@ const importing = ref(false)
 const files = ref<File[]>([])
 const dragDepth = ref(0)
 const dragActive = computed(() => dragDepth.value > 0)
-const hasCreatedData = ref(false)
+const hasImportedData = ref(false)
 const result = ref<AdminDataImportResult | null>(null)
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -141,7 +141,7 @@ watch(
     if (open) {
       files.value = []
       dragDepth.value = 0
-      hasCreatedData.value = false
+      hasImportedData.value = false
       result.value = null
       if (fileInput.value) {
         fileInput.value.value = ''
@@ -162,8 +162,8 @@ const handleFileChange = (event: Event) => {
 
 const handleClose = () => {
   if (importing.value) return
-  if (hasCreatedData.value) {
-    hasCreatedData.value = false
+  if (hasImportedData.value) {
+    hasImportedData.value = false
     emit('imported')
   }
   emit('close')
@@ -249,6 +249,14 @@ const isValidDataPayload = (payload: unknown): payload is AdminDataPayload => {
   return Array.isArray(candidate.proxies) && Array.isArray(candidate.accounts)
 }
 
+const isOAuthFile = (value: unknown): value is Record<string, unknown> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const auth = value as Record<string, unknown>
+  if ('accounts' in auth || 'proxies' in auth) return false
+  const tokens = (auth.tokens || auth) as Record<string, unknown>
+  return typeof tokens.access_token === 'string' || typeof tokens.accessToken === 'string'
+}
+
 const mergeDataPayloads = (payloads: AdminDataPayload[]): AdminDataPayload => {
   const [firstPayload] = payloads
   if (payloads.length === 1 && firstPayload) return firstPayload
@@ -259,6 +267,7 @@ const mergeDataPayloads = (payloads: AdminDataPayload[]): AdminDataPayload => {
     exported_at: new Date().toISOString(),
     proxies: payloads.flatMap((item) => item.proxies),
     accounts: payloads.flatMap((item) => item.accounts),
+    auth_files: payloads.flatMap((item) => item.auth_files || []),
     skipped_shadows: payloads.reduce((sum, item) => {
       const count = Number(item.skipped_shadows || 0)
       return Number.isFinite(count) ? sum + count : sum
@@ -285,6 +294,10 @@ const handleImport = async () => {
         )
         return
       }
+      if (isOAuthFile(parsed)) {
+        dataPayloads.push({ exported_at: '', proxies: [], accounts: [], auth_files: [{ name: sourceFile.name, auth: parsed }] })
+        continue
+      }
       if (!isValidDataPayload(parsed)) {
         appStore.showError(t('admin.accounts.dataImportInvalidFile', { name: sourceFile.name }))
         return
@@ -298,19 +311,20 @@ const handleImport = async () => {
       skip_default_group_bind: true
     })
 
-    result.value = res
+    result.value = { ...res, account_updated: res.account_updated ?? 0 }
 
     const msgParams: Record<string, unknown> = {
       account_created: res.account_created,
+      account_updated: res.account_updated ?? 0,
       account_failed: res.account_failed,
       proxy_created: res.proxy_created,
       proxy_reused: res.proxy_reused,
       proxy_failed: res.proxy_failed,
     }
     if (res.account_failed > 0 || res.proxy_failed > 0) {
-      // 部分成功也创建了数据;弹窗关闭时通过 imported 通知父组件刷新列表
-      if (res.account_created > 0 || res.proxy_created > 0) {
-        hasCreatedData.value = true
+      // 部分成功时，关闭弹窗后刷新账号列表。
+      if (res.account_created > 0 || (res.account_updated ?? 0) > 0 || res.proxy_created > 0) {
+        hasImportedData.value = true
       }
       appStore.showError(t('admin.accounts.dataImportCompletedWithErrors', msgParams))
     } else {

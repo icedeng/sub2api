@@ -253,6 +253,20 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 		}
 		markCodexIdentitySeen(seenIdentity, item.IdentityKeys, entry.Index, item.UserID)
 
+		if updateExisting && !item.IsAgentIdentity {
+			id, err := h.replaceImportedTokens(ctx, item.Credentials, false)
+			if err != nil {
+				result.Failed++
+				result.Items = append(result.Items, CodexSessionImportItem{Index: entry.Index, Name: accountName, Action: "failed", Message: err.Error()})
+				result.Errors = append(result.Errors, CodexSessionImportMessage{Index: entry.Index, Name: accountName, Message: err.Error()})
+				continue
+			}
+			if id != 0 {
+				result.Updated++
+				result.Items = append(result.Items, CodexSessionImportItem{Index: entry.Index, Name: accountName, Action: "updated", AccountID: id})
+				continue
+			}
+		}
 		existing, matchedKey := index.Find(item.IdentityKeys, item.UserID)
 		if existing != nil && updateExisting {
 			if strings.HasPrefix(matchedKey, "account:") && item.UserID != "" &&
@@ -560,6 +574,7 @@ func normalizeCodexImportEntry(entry codexImportEntry) (*codexImportAccount, err
 		item.AccountID = firstCodexString(raw,
 			[]string{"chatgpt_account_id"},
 			[]string{"chatgptAccountId"},
+			[]string{"tokens", "account_id"},
 			[]string{"account_id"},
 			[]string{"accountId"},
 			[]string{"account", "id"},

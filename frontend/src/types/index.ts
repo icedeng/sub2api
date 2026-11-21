@@ -1701,6 +1701,7 @@ export interface UpdateProxyRequest {
 }
 
 export interface AdminDataPayload {
+  auth_files?: { name: string; auth: Record<string, unknown> }[]
   type?: string
   version?: number
   exported_at: string
@@ -1748,6 +1749,7 @@ export interface AdminDataImportResult {
   proxy_reused: number
   proxy_failed: number
   account_created: number
+  account_updated?: number
   account_failed: number
   errors?: AdminDataImportError[]
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/wayviaegress"
 	"github.com/gin-gonic/gin"
 )
 
@@ -25,14 +26,20 @@ const (
 )
 
 type DataPayload struct {
-	Type       string        `json:"type,omitempty"`
-	Version    int           `json:"version,omitempty"`
-	ExportedAt string        `json:"exported_at"`
-	Proxies    []DataProxy   `json:"proxies"`
-	Accounts   []DataAccount `json:"accounts"`
+	AuthFiles  []CodexAuthFile `json:"auth_files,omitempty"`
+	Type       string          `json:"type,omitempty"`
+	Version    int             `json:"version,omitempty"`
+	ExportedAt string          `json:"exported_at"`
+	Proxies    []DataProxy     `json:"proxies"`
+	Accounts   []DataAccount   `json:"accounts"`
 	// SkippedShadows 记录导出时被排除的 spark 影子账号数量(见 ExportData)。仅作可见性提示,
 	// 导入侧忽略该字段;omitempty 保持向后兼容。
 	SkippedShadows int `json:"skipped_shadows,omitempty"`
+}
+
+type CodexAuthFile struct {
+	Name string         `json:"name"`
+	Auth map[string]any `json:"auth"`
 }
 
 type DataProxy struct {
@@ -81,6 +88,7 @@ type DataImportResult struct {
 	ProxyCreated   int               `json:"proxy_created"`
 	ProxyReused    int               `json:"proxy_reused"`
 	ProxyFailed    int               `json:"proxy_failed"`
+	AccountUpdated int               `json:"account_updated"`
 	AccountCreated int               `json:"account_created"`
 	AccountFailed  int               `json:"account_failed"`
 	Errors         []DataImportError `json:"errors,omitempty"`
@@ -403,6 +411,28 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 	// 收集需要异步设置隐私的 Antigravity OAuth 账号
 	var privacyAccounts []*service.Account
 
+	for i, file := range dataPayload.AuthFiles {
+		item, err := normalizeCodexImportEntry(codexImportEntry{Index: i + 1, Value: file.Auth})
+		if err == nil && item.IsAgentIdentity {
+			err = errors.New("请选择 OAuth auth.json 文件")
+		}
+		if err != nil {
+			result.AccountFailed++
+			result.Errors = append(result.Errors, DataImportError{Kind: "account", Name: file.Name, Message: err.Error()})
+			continue
+		}
+		expires, _, pause, _, err := resolveCodexImportExpiry(CodexSessionImportRequest{}, item)
+		if err != nil {
+			result.AccountFailed++
+			result.Errors = append(result.Errors, DataImportError{Kind: "account", Name: file.Name, Message: err.Error()})
+			continue
+		}
+		dataPayload.Accounts = append(dataPayload.Accounts, DataAccount{
+			Name: item.Name, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+			Credentials: item.Credentials, Concurrency: 3, Priority: 50,
+			ExpiresAt: expires, AutoPauseOnExpired: pause,
+		})
+	}
 	for i := range dataPayload.Accounts {
 		item := dataPayload.Accounts[i]
 		if err := validateDataAccount(item); err != nil {
@@ -413,6 +443,20 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 				Message: err.Error(),
 			})
 			continue
+		}
+
+		enrichCredentialsFromIDToken(&item)
+		if item.Platform == service.PlatformOpenAI && item.Type == service.AccountTypeOAuth {
+			updatedID, err := h.replaceImportedTokens(ctx, item.Credentials, true)
+			if err != nil {
+				result.AccountFailed++
+				result.Errors = append(result.Errors, DataImportError{Kind: "account", Name: item.Name, Message: err.Error()})
+				continue
+			}
+			if updatedID != 0 {
+				result.AccountUpdated++
+				continue
+			}
 		}
 
 		var proxyID *int64
@@ -430,8 +474,6 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 				continue
 			}
 		}
-
-		enrichCredentialsFromIDToken(&item)
 
 		accountInput := &service.CreateAccountInput{
 			Name:                 item.Name,
@@ -486,6 +528,28 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 	}
 
 	return result, nil
+}
+
+// 根据新 AT 查找原账号，命中后由出口模块验签并受控写入。
+func (h *AccountHandler) replaceImportedTokens(ctx context.Context, credentials map[string]any, includeUnbound bool) (int64, error) {
+	m := wayviaegress.Default()
+	candidate := wayviaegress.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: credentials}
+	if m == nil || !candidate.OrdinaryOAuth() {
+		return 0, nil
+	}
+	identity := codexCredentialString(credentials, "chatgpt_user_id")
+	if claims, err := decodeCodexJWTClaims(codexCredentialString(credentials, "access_token")); err == nil && claims.OpenAIAuth != nil && claims.OpenAIAuth.ChatGPTUserID != "" {
+		if identity != "" && claims.OpenAIAuth.ChatGPTUserID != identity {
+			return 0, errors.New("新 Access Token 与文件中的用户身份不一致")
+		}
+		identity = claims.OpenAIAuth.ChatGPTUserID
+		credentials["chatgpt_user_id"] = identity
+	}
+	id, err := m.ReplaceImportTokens(ctx, identity, credentials, includeUnbound)
+	if id != 0 && h.tokenCacheInvalidator != nil {
+		_ = h.tokenCacheInvalidator.InvalidateToken(context.WithoutCancel(ctx), &service.Account{ID: id, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth})
+	}
+	return id, err
 }
 
 func (h *AccountHandler) listAllProxies(ctx context.Context) ([]service.Proxy, error) {
