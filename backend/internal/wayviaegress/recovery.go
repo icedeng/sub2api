@@ -146,7 +146,7 @@ func (m *Manager) recoverRuntimeOnce(ctx context.Context) error {
 	 JOIN accounts a ON a.id=p.root_account_id
 	 WHERE j.state='retry' AND j.next_attempt_at<=now() AND j.policy_version=p.policy_version AND j.binding_id=p.active_binding_id
 	 AND p.current_mode='strict_ipv6' AND p.target_mode='strict_ipv6' AND p.state='blocked'
-	 AND a.status='active' AND a.schedulable AND a.deleted_at IS NULL
+	 AND a.status='active' AND a.deleted_at IS NULL
 	 AND EXISTS(SELECT 1 FROM settings WHERE key='wayvia_ipv6_egress' AND (value::jsonb->>'enabled')::boolean)
 	 AND NOT EXISTS(SELECT 1 FROM wayvia_egress_operations WHERE phase IN ('accepted','draining','preparing'))
 	 ORDER BY j.next_attempt_at LIMIT 1 FOR UPDATE OF j SKIP LOCKED

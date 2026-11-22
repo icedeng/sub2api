@@ -126,7 +126,7 @@ func (m *Manager) Change(ctx context.Context, c Change, actor string) (Operation
 		m.mu.Unlock()
 		return Operation{}, Error("EGRESS_RECOVERY_CHANGED", "恢复任务已失效")
 	}
-	if c.recovering && (a.Status != "active" || !a.Schedulable || !runtime.Enabled) {
+	if c.recovering && (a.Status != "active" || !runtime.Enabled) {
 		m.mu.Unlock()
 		return Operation{}, Error("EGRESS_RECOVERY_DEFERRED", "账号或固定出口已暂停，等待恢复")
 	}
@@ -448,9 +448,9 @@ func (m *Manager) execute(mark pending) {
 				}
 				if e == nil && mark.Operation.Kind == "recover" {
 					var allowed bool
-					e = tx.QueryRowContext(ctx, `SELECT status='active' AND schedulable AND deleted_at IS NULL FROM accounts WHERE id=$1`, p.AccountID).Scan(&allowed)
+					e = tx.QueryRowContext(ctx, `SELECT status='active' AND deleted_at IS NULL FROM accounts WHERE id=$1`, p.AccountID).Scan(&allowed)
 					if e == nil && !allowed {
-						e = Error("EGRESS_RECOVERY_DEFERRED", "账号已暂停，保留原绑定等待恢复")
+						e = Error("EGRESS_RECOVERY_DEFERRED", "账号已停用，保留原绑定等待恢复")
 					}
 				}
 				if e == nil {
