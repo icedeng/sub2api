@@ -117,26 +117,23 @@ func TestRuntimeRecoveryKeepsBindingAndRestoresGate(t *testing.T) {
 		t.Fatal("recovery allocated an address", count, err)
 	}
 }
-func TestRuntimeRecoveryKeepsPauseAndRetriesTransientFailure(t *testing.T) {
+func TestRuntimeRecoveryPreservesSchedulingPause(t *testing.T) {
 	m := recoveryFixture(t)
-	queueRecovery(t, m)
 	if _, err := m.db.Exec(`UPDATE accounts SET schedulable=false WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
+	before := queueRecovery(t, m)
 	runRecovery(t, m)
-	if p := m.policies[1]; p.RecoveryState != "completed" || p.State != "ready" || m.accounts[1].Schedulable {
-		t.Fatal("paused account recovery did not preserve scheduling state", p, m.accounts[1])
+	after := m.policies[1]
+	if after.RecoveryState != "completed" || after.State != "ready" || after.BindingID != before.BindingID || after.Source != before.Source || m.accounts[1].Schedulable {
+		t.Fatal("expected verified original binding with scheduling still paused", after)
 	}
-	if _, err := m.db.Exec(`UPDATE accounts SET schedulable=true,status='disabled' WHERE id=1`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.db.Exec(`UPDATE wayvia_egress_recoveries SET state='retry',attempts=0,next_attempt_at=now(),last_error='EGRESS_SOURCE_UNREADY' WHERE owner_id=$1`, m.policies[1].Owner); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.db.Exec(`UPDATE wayvia_account_egress_policies SET state='blocked',last_error='EGRESS_SOURCE_UNREADY' WHERE owner_id=$1`, m.policies[1].Owner); err != nil {
-		t.Fatal(err)
-	}
-	for _, q := range []string{`UPDATE accounts SET status='disabled'`, `UPDATE accounts SET status='active';UPDATE settings SET value='{"enabled":false,"initialized":true,"revision":1}' WHERE key='wayvia_ipv6_egress'`} {
+}
+
+func TestRuntimeRecoveryDefersDisabledAndRetriesTransientFailure(t *testing.T) {
+	m := recoveryFixture(t)
+	queueRecovery(t, m)
+	for _, q := range []string{`UPDATE accounts SET status='disabled' WHERE id=1`, `UPDATE accounts SET status='active' WHERE id=1;UPDATE settings SET value='{"enabled":false,"initialized":true,"revision":1}' WHERE key='wayvia_ipv6_egress'`} {
 		if _, err := m.db.Exec(q); err != nil {
 			t.Fatal(err)
 		}
@@ -187,13 +184,17 @@ func TestRuntimeRecoveryRejectsMismatchAndLatePause(t *testing.T) {
 			runRecovery(t, m)
 			if kind == "pause" {
 				if m.accounts[1].Schedulable || m.policies[1].RecoveryState != "completed" || m.policies[1].State != "ready" {
-					t.Fatal("manual pause lost during recovery", m.accounts[1], m.policies[1])
+					t.Fatal("manual pause lost during recovery", m.policies[1])
 				}
-				if _, err := m.Resolve(1, "business"); err != nil {
-					t.Fatal("paused account recovery did not reopen the fixed IPv6 gate", err)
+				if _, err := m.Resolve(1, "query"); err != nil {
+					t.Fatal("verified binding unavailable for a paused account query", err)
 				}
+				return
 			}
-			if kind != "pause" && m.policies[1].RecoveryState != "blocked" {
+			if _, err := m.Resolve(1, "business"); err == nil {
+				t.Fatal("unsafe recovery opened gate")
+			}
+			if m.policies[1].RecoveryState != "blocked" {
 				t.Fatal(m.policies[1])
 			}
 		})
