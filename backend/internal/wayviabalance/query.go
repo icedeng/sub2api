@@ -53,8 +53,9 @@ func (m *Manager) metadataKey(a *service.Account, root string) string {
 		proxy = a.Proxy.URL()
 	}
 	// 公开请求只允许 Accept-Language 和 User-Agent 覆写；不复制准入头和任何 Cookie。
-	headers := a.GetHeaderOverrides()
-	return digest(root + "\x00" + proxy + "\x00" + headers["user-agent"] + "\x00" + headers["accept-language"])
+	userAgent, _ := a.HeaderOverrideValue("user-agent")
+	language, _ := a.HeaderOverrideValue("accept-language")
+	return digest(root + "\x00" + proxy + "\x00" + userAgent + "\x00" + language)
 }
 
 func (m *Manager) fetch(ctx context.Context, a *service.Account, root, path, token, userID string, public bool) ([]byte, error) {
@@ -78,13 +79,14 @@ func (m *Manager) fetch(ctx context.Context, a *service.Account, root, path, tok
 	}
 	req.Header.Set("Accept", "application/json")
 	if public {
-		for key, value := range a.GetHeaderOverrides() {
-			if key == "user-agent" || key == "accept-language" {
+		for _, key := range []string{"user-agent", "accept-language"} {
+			if value, ok := a.HeaderOverrideValue(key); ok {
 				req.Header.Set(key, value)
 			}
 		}
 	} else {
-		a.ApplyHeaderOverrides(req.Header)
+		// 余额探测属于账号后台任务，仅应用静态覆写。HTTP 请求仍使用自己的超时和取消上下文。
+		a.ApplyHeaderOverrides(context.Background(), req.Header)
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
 		if userID != "" {

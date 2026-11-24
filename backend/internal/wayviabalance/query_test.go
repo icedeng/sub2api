@@ -98,6 +98,32 @@ func TestBalanceQueryPublicHeadersAndMetadataReuse(t *testing.T) {
 	require.True(t, service.HTTPUpstreamPublicHostsOnly(calls[0].Context()))
 }
 
+func TestBalanceQueriesKeepGatewayIdentityOutOfProbeHeaders(t *testing.T) {
+	m, transport := newBalanceQueryManager(t, func(*http.Request) (*http.Response, error) {
+		return queryHTTPResponse(200, "{}"), nil
+	})
+	a := queryAccount(1, "model-key")
+	a.Credentials["header_override_enabled"] = true
+	a.Credentials["header_overrides"] = map[string]string{
+		"User-Agent": "{{user_id}}", "Accept-Language": "zh-CN", "X-User": "{{user_id}}",
+	}
+	ctx := service.WithHeaderOverrideRequestScope(context.Background(), 37, 45, nil)
+	for _, public := range []bool{true, false} {
+		_, err := m.fetch(ctx, a, "https://example.test", "/status", "balance-token", "", public)
+		require.NoError(t, err)
+	}
+	calls := transport.calls()
+	require.Len(t, calls, 2)
+	for _, call := range calls {
+		for name := range call.Header {
+			require.False(t, strings.EqualFold(name, "User-Agent") || strings.EqualFold(name, "X-User"), name)
+		}
+	}
+	require.Equal(t, "zh-CN", calls[0].Header.Get("Accept-Language"))
+	require.Empty(t, calls[0].Header.Get("Authorization"))
+	require.Equal(t, "Bearer balance-token", calls[1].Header.Get("Authorization"))
+}
+
 func TestBalanceQueryMetadataIsolation(t *testing.T) {
 	m, transport := newBalanceQueryManager(t, func(*http.Request) (*http.Response, error) { return queryHTTPResponse(200, queryValidMetadata), nil })
 	ctx := context.Background()
